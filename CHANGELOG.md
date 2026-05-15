@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.9.2 - Unreleased
+
 ## 0.9.1 - 2026-05-15
 
 - Added finding queue commands, triage history, bulk revalidation filters, and stricter review evidence/test-analysis fields.
