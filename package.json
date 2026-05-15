@@ -1,10 +1,10 @@
 {
   "name": "clawpatch",
-  "version": "0.9.1",
+  "version": "0.1.0",
   "description": "Automated code review that lands fixes.",
   "license": "MIT",
   "bin": {
-    "clawpatch": "./dist/cli.js"
+    "clawpatch": "dist/cli.js"
   },
   "files": [
     "dist",
