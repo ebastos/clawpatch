@@ -214,15 +214,6 @@ export function packageVersion(): string {
   return typeof pkg.version === "string" ? pkg.version : "0.0.0";
 }
 
-function validateKnownCommand(command: string): void {
-  if (command === "") {
-    return;
-  }
-  if (!isKnownCommand(command)) {
-    throw new ClawpatchError(`unknown command: ${command}`, 2, "invalid-usage");
-  }
-}
-
 function validateCommandFlags(command: string, flags: Record<string, string | boolean>): void {
   if (!isKnownCommand(command)) {
     throw new ClawpatchError(`unknown command: ${command}`, 2, "invalid-usage");
