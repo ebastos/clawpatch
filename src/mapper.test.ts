@@ -403,6 +403,16 @@ describe("mapFeatures", () => {
     });
   });
 
+  it("detects RuboCop extension gems as Ruby lint providers", async () => {
+    const root = await fixtureRoot("clawpatch-map-rubocop-extension-");
+    await writeFixture(root, "Gemfile", "source 'https://rubygems.org'\ngem 'rubocop-rails'\n");
+    await writeFixture(root, "lib/fixture.rb", "module Fixture\nend\n");
+
+    const project = await detectProject(root);
+
+    expect(project.detected.commands.lint).toBe("bundle exec rubocop");
+  });
+
   it("does not treat Ruby test helpers as Minitest tests", async () => {
     const root = await fixtureRoot("clawpatch-map-ruby-test-helper-");
     await writeFixture(root, "Gemfile", "source 'https://rubygems.org'\n");

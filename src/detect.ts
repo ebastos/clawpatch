@@ -364,7 +364,7 @@ async function rubyDefaultCommands(root: string): Promise<ProjectCommands> {
     (await containsRubySpecFile(root, 5));
   const hasMinitest = dependencies.has("minitest") || (await containsRubyTestFile(root, 5));
   const hasRubocop =
-    dependencies.has("rubocop") ||
+    hasRubocopDependency(dependencies) ||
     (await pathExists(join(root, ".rubocop.yml"))) ||
     (await pathExists(join(root, ".rubocop_todo.yml")));
   const run = hasBundle ? "bundle exec " : "";
@@ -374,6 +374,12 @@ async function rubyDefaultCommands(root: string): Promise<ProjectCommands> {
     format: null,
     test: hasRspec ? `${run}rspec` : hasMinitest ? `${run}rake test` : null,
   };
+}
+
+function hasRubocopDependency(dependencies: Set<string>): boolean {
+  return [...dependencies].some(
+    (dependency) => dependency === "rubocop" || dependency.startsWith("rubocop-"),
+  );
 }
 
 async function hasBundlerConfig(root: string): Promise<boolean> {
