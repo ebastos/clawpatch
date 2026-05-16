@@ -2977,6 +2977,46 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
+  it("does not treat Kotlin DSL apply(false) Android plugin declarations as Android modules", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-apply-method-false-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "build.gradle.kts",
+      [
+        "plugins {",
+        '  id("com.android.application").version("8.0").apply(false)',
+        '  id("org.jetbrains.kotlin.jvm")',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/OrderController.kt",
+      [
+        "package com.example.api",
+        "",
+        "import org.springframework.web.bind.annotation.RestController",
+        "",
+        "@RestController",
+        "class OrderController",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const web = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role web entrypoint "),
+    );
+
+    expect(web?.source).toBe("kotlin-server-role-web-entrypoint");
+    expect(
+      result.features.some((feature) => feature.source.startsWith("kotlin-android-role-")),
+    ).toBe(false);
+  });
+
   it("does not treat commented Android plugin declarations as Android modules", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-android-commented-plugin-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
@@ -3111,6 +3151,39 @@ describe("mapFeatures", () => {
           ),
       ),
     ).toBe(true);
+  });
+
+  it("does not resolve explicitly imported Kotlin stdlib return types as framework roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-stdlib-direct-type-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/time/Timer.kt",
+      [
+        "package com.example.time",
+        "",
+        "import kotlin.time.Duration",
+        "",
+        "class Timer {",
+        "  fun elapsed(): Duration = Duration.ZERO",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/time/Timer.kt",
+          ),
+      ),
+    ).toBe(false);
   });
 
   it("does not resolve local Kotlin declarations through wildcard imports", async () => {

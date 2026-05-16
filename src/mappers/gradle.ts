@@ -797,7 +797,7 @@ function kotlinImportForType(
 ): string | undefined {
   const direct = info.imports.get(type);
   if (direct !== undefined) {
-    return direct;
+    return isKotlinStdlibImport(direct) ? undefined : direct;
   }
   const packageName = info.packageName ?? "";
   if (
@@ -811,7 +811,10 @@ function kotlinImportForType(
   }
   for (const full of info.imports.values()) {
     if (full.endsWith(".*")) {
-      return `${full.slice(0, -1)}${type}`;
+      const wildcardType = `${full.slice(0, -1)}${type}`;
+      if (!isKotlinStdlibImport(wildcardType)) {
+        return wildcardType;
+      }
     }
   }
   return undefined;
@@ -891,6 +894,10 @@ function isKotlinBuiltinType(type: string): boolean {
     "Triple",
     "Unit",
   ].includes(type);
+}
+
+function isKotlinStdlibImport(full: string): boolean {
+  return full.startsWith("kotlin.");
 }
 
 function parseJavaFile(source: string): JavaFileInfo {
@@ -1446,7 +1453,7 @@ function hasAppliedAndroidPlugin(buildSource: string): boolean {
   return stripJavaComments(buildSource)
     .split(/\r?\n/u)
     .some((line) => {
-      if (/\bapply\s+false\b/u.test(line)) {
+      if (/\bapply\s+false\b|\.\s*apply\s*\(\s*false\s*\)/u.test(line)) {
         return false;
       }
       return (
