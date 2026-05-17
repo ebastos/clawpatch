@@ -6,6 +6,7 @@
 - Added `clawpatch open-pr --patch <id>` to turn an applied patch attempt into an explicit GitHub pull request.
 - Added review prompt provenance and budget accounting for included files, omitted files, prompt bytes, and approximate tokens.
 - Hardened review ingestion so provider findings must cite included files with valid line ranges and matching evidence quotes.
+- Fixed provider review to preserve valid findings when a sibling finding fails per-finding schema validation. Previously a single bad enum value caused the whole feature to lose every finding via a strict `reviewOutputSchema.parse` throw. Dropped findings are now recorded in `run.errors` with `code: "schema-drop"` and do not fail the run.
 - Fixed `clawpatch open-pr` so repositories without default-branch metadata use a dedicated patch branch and let GitHub choose the PR base.
 - Fixed `clawpatch open-pr` retries to push the recorded patch commit instead of any later local branch tip.
 - Fixed first-time `clawpatch open-pr` branch creation to start from the recorded patch base.
