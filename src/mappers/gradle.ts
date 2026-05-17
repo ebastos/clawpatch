@@ -350,6 +350,12 @@ type KotlinFileInfo = {
   declarations: KotlinDeclaration[];
   functionReturnTypes: Set<string>;
 };
+type ParsedKotlinFile = { filePath: string; info: KotlinFileInfo };
+type KotlinProjectIndex = {
+  files: ParsedKotlinFile[];
+  packages: Set<string>;
+  packageTypes: Map<string, Set<string>>;
+};
 
 export async function gradleSeeds(root: string): Promise<FeatureSeed[]> {
   const roots = await discoverGradleRoots(root);
@@ -363,6 +369,7 @@ export async function gradleSeeds(root: string): Promise<FeatureSeed[]> {
 async function gradleProjectSeeds(root: string, gradleRoot: string): Promise<FeatureSeed[]> {
   const moduleRoots = await gradleModuleRoots(root, gradleRoot);
   const projectSourceFiles = await gradleMainSourceFiles(root, moduleRoots);
+  const kotlinProjectIndex = await gradleKotlinProjectIndex(root, projectSourceFiles);
   const seeds: FeatureSeed[] = [];
   for (const moduleRoot of moduleRoots) {
     const buildFile = await gradleBuildFile(root, moduleRoot);
@@ -428,7 +435,7 @@ async function gradleProjectSeeds(root: string, gradleRoot: string): Promise<Fea
         sourceFiles,
         testFiles,
         tags,
-        projectSourceFiles,
+        kotlinProjectIndex,
       )),
     );
 
@@ -458,6 +465,21 @@ async function gradleProjectSeeds(root: string, gradleRoot: string): Promise<Fea
   return seeds;
 }
 
+async function gradleKotlinProjectIndex(
+  root: string,
+  projectSourceFiles: string[],
+): Promise<KotlinProjectIndex | null> {
+  const files = await gradleKotlinFiles(root, projectSourceFiles, []);
+  if (files.length === 0) {
+    return null;
+  }
+  return {
+    files,
+    packages: await gradleProjectPackages(root, projectSourceFiles, files),
+    packageTypes: await kotlinPackageDeclarations(root, projectSourceFiles, files),
+  };
+}
+
 async function gradleMainSourceFiles(root: string, moduleRoots: string[]): Promise<string[]> {
   const files = new Set<string>();
   for (const moduleRoot of moduleRoots) {
@@ -478,34 +500,27 @@ async function kotlinRoleSeeds(
   sourceFiles: string[],
   testFiles: string[],
   tags: string[],
-  projectSourceFiles: string[],
+  projectIndex: KotlinProjectIndex | null,
 ): Promise<FeatureSeed[]> {
+  if (projectIndex === null) {
+    return [];
+  }
   const matches = new Map<
     KotlinRoleKey,
     Map<string, Array<{ reason: string; confidence: FeatureSeed["confidence"] }>>
   >();
-  const kotlinFiles: Array<{ filePath: string; info: KotlinFileInfo }> = [];
-  for (const filePath of sourceFiles.filter((file) => file.endsWith(".kt"))) {
-    const source = await readFile(join(root, filePath), "utf8");
-    kotlinFiles.push({ filePath, info: parseKotlinFile(source) });
-  }
+  const sourceFileSet = new Set(sourceFiles);
+  const kotlinFiles = projectIndex.files.filter(({ filePath }) => sourceFileSet.has(filePath));
   if (kotlinFiles.length === 0) {
     return [];
   }
-  const projectKotlinFiles = await gradleKotlinFiles(root, projectSourceFiles, kotlinFiles);
-  const projectPackages = await gradleProjectPackages(root, projectSourceFiles, projectKotlinFiles);
-  const kotlinPackageTypes = await kotlinPackageDeclarations(
-    root,
-    projectSourceFiles,
-    projectKotlinFiles,
-  );
 
   for (const { filePath, info } of kotlinFiles) {
     const frameworkEvidence = kotlinFrameworkRoleEvidence(
       info,
       tags,
-      projectPackages,
-      kotlinPackageTypes,
+      projectIndex.packages,
+      projectIndex.packageTypes,
     );
     const pathEvidence = kotlinPathRoleEvidence(filePath, tags).filter(
       (item) =>
@@ -570,8 +585,8 @@ async function kotlinRoleSeeds(
 async function gradleKotlinFiles(
   root: string,
   sourceFiles: string[],
-  parsedFiles: Array<{ filePath: string; info: KotlinFileInfo }>,
-): Promise<Array<{ filePath: string; info: KotlinFileInfo }>> {
+  parsedFiles: ParsedKotlinFile[],
+): Promise<ParsedKotlinFile[]> {
   const byPath = new Map(parsedFiles.map((file) => [file.filePath, file]));
   for (const filePath of sourceFiles.filter((file) => file.endsWith(".kt"))) {
     if (!byPath.has(filePath)) {
@@ -621,7 +636,7 @@ function kotlinRoleSource(role: KotlinRoleKey): string {
 async function gradleProjectPackages(
   root: string,
   sourceFiles: string[],
-  kotlinFiles: Array<{ filePath: string; info: KotlinFileInfo }>,
+  kotlinFiles: ParsedKotlinFile[],
 ): Promise<Set<string>> {
   const packages = new Set(
     kotlinFiles.flatMap(({ info }) => (info.packageName === null ? [] : [info.packageName])),
@@ -639,7 +654,7 @@ async function gradleProjectPackages(
 async function kotlinPackageDeclarations(
   root: string,
   sourceFiles: string[],
-  kotlinFiles: Array<{ filePath: string; info: KotlinFileInfo }>,
+  kotlinFiles: ParsedKotlinFile[],
 ): Promise<Map<string, Set<string>>> {
   const declarations = new Map<string, Set<string>>();
   for (const { info } of kotlinFiles) {
@@ -1231,7 +1246,7 @@ function parseJavaDeclarations(source: string): JavaDeclaration[] {
 function parseKotlinDeclarations(source: string): KotlinDeclaration[] {
   const declarations: KotlinDeclaration[] = [];
   const declarationPattern =
-    /\b(?:(?:data|sealed|open|abstract|final|inner|value|annotation)\s+)*(?:(enum)\s+)?(?:(fun)\s+)?(class|interface|object)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<[^{};]*>)?(?:(?:\s+(?:@[A-Za-z_][A-Za-z0-9_.]*(?:\([^(){}]*\))?\s*)*(?:(?:public|private|protected|internal)\s+)?constructor\s*\((?:[^(){}]|\([^(){}]*\))*\))|(?:\s*\((?:[^(){}]|\([^(){}]*\))*\)))?(?:\s*:\s*([^{}\n]+))?/gsu;
+    /\b(?:(?:data|sealed|open|abstract|final|inner|value|annotation)\s+)*(?:(enum)\s+)?(?:(fun)\s+)?(class|interface|object)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<[^{};]*>)?(?:(?:\s+(?:@[A-Za-z_][A-Za-z0-9_.]*(?:\([^(){}]*\))?\s*)*(?:(?:public|private|protected|internal)\s+)?constructor\s*\((?:[^(){}]|\([^(){}]*\))*\))|(?:\s*\((?:[^(){}]|\([^(){}]*\))*\)))?(?:\s*:\s*([^{}]+?)(?=\s*(?:\{|\n\s*(?:@[A-Za-z_][A-Za-z0-9_.]*(?:\([^(){}]*\))?\s*)*(?:(?:data|sealed|open|abstract|final|inner|value|annotation)\s+)*(?:enum\s+)?(?:fun\s+)?(?:class|interface|object)\s+|$)))?/gsu;
   for (const match of source.matchAll(declarationPattern)) {
     const rawKind = match[3];
     const name = match[4];
