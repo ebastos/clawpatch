@@ -682,31 +682,21 @@ function kotlinFrameworkRoleEvidence(
 
   for (const declaration of info.declarations) {
     for (const type of declaration.supertypes) {
-      if (
-        isAndroid &&
-        [
-          "Activity",
-          "AppCompatActivity",
-          "ComponentActivity",
-          "Fragment",
-          "Service",
-          "BroadcastReceiver",
-        ].includes(type)
-      ) {
+      if (isAndroid && isAndroidUiEntrypointSupertype(info, type, kotlinPackageTypes)) {
         evidence.push({
           role: "android-ui-entrypoint",
           reason: `inherits Android UI type ${type}`,
           confidence: "high",
         });
       }
-      if (isAndroid && ["ViewModel", "AndroidViewModel"].includes(type)) {
+      if (isAndroid && isAndroidViewModelSupertype(info, type, kotlinPackageTypes)) {
         evidence.push({
           role: "android-view-model",
           reason: `inherits Android ViewModel type ${type}`,
           confidence: "high",
         });
       }
-      if (isAndroid && ["RoomDatabase"].includes(type)) {
+      if (isAndroid && isAndroidRoomSupertype(info, type, kotlinPackageTypes)) {
         evidence.push({
           role: "android-data-boundary",
           reason: `inherits Room type ${type}`,
@@ -775,6 +765,9 @@ function kotlinImportForType(
   type: string,
   kotlinPackageTypes: Map<string, Set<string>>,
 ): string | undefined {
+  if (type.includes(".")) {
+    return isKotlinStdlibImport(type) ? undefined : type;
+  }
   const direct = info.imports.get(type);
   if (direct !== undefined) {
     return isKotlinStdlibImport(direct) ? undefined : direct;
@@ -1200,6 +1193,32 @@ function isAndroidUiEntrypointImport(full: string): boolean {
   ].includes(full);
 }
 
+function isAndroidUiEntrypointSupertype(
+  info: KotlinFileInfo,
+  type: string,
+  kotlinPackageTypes: Map<string, Set<string>>,
+): boolean {
+  const full = kotlinImportForType(info, type, kotlinPackageTypes);
+  return full !== undefined && isAndroidUiEntrypointImport(full);
+}
+
+function isAndroidViewModelSupertype(
+  info: KotlinFileInfo,
+  type: string,
+  kotlinPackageTypes: Map<string, Set<string>>,
+): boolean {
+  const full = kotlinImportForType(info, type, kotlinPackageTypes);
+  return full === "androidx.lifecycle.ViewModel" || full === "androidx.lifecycle.AndroidViewModel";
+}
+
+function isAndroidRoomSupertype(
+  info: KotlinFileInfo,
+  type: string,
+  kotlinPackageTypes: Map<string, Set<string>>,
+): boolean {
+  return kotlinImportForType(info, type, kotlinPackageTypes) === "androidx.room.RoomDatabase";
+}
+
 function isSpringDataPersistenceImport(full: string): boolean {
   return (
     full.startsWith("org.springframework.data.repository.") ||
@@ -1244,9 +1263,7 @@ function kotlinTypeNames(raw: string): string[] {
     current += char;
   }
   parts.push(current);
-  return parts
-    .map((type) => baseKotlinTypeName(stripGenericParameters(type)))
-    .filter((type) => type.length > 0);
+  return parts.map((type) => kotlinTypeReferenceName(type)).filter((type) => type.length > 0);
 }
 
 function baseJavaTypeName(raw: string): string {
@@ -1270,6 +1287,17 @@ function baseKotlinTypeName(raw: string): string {
       ?.replace(/[^A-Za-z0-9_]/gu, "")
       .trim() ?? ""
   );
+}
+
+function kotlinTypeReferenceName(raw: string): string {
+  const type = stripGenericParameters(raw)
+    .replace(/\([^()]*\)/gu, "")
+    .replace(/\?.*$/su, "")
+    .trim();
+  if (type.includes(".")) {
+    return type.replace(/[^A-Za-z0-9_.]/gu, "");
+  }
+  return baseKotlinTypeName(type);
 }
 
 function splitJavaTypeList(raw: string): string[] {

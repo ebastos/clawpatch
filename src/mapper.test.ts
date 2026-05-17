@@ -3428,6 +3428,37 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
+  it("does not map local Android supertype name collisions as UI entrypoints", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-local-activity-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("com.android.application") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/domain/LocalActivity.kt",
+      [
+        "package com.example.domain",
+        "",
+        "open class Activity",
+        "",
+        "class CleanupJob : Activity()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-android-role-ui-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/domain/LocalActivity.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
   it("maps Kotlin role evidence from wildcard imports", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-wildcard-imports-");
     await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
