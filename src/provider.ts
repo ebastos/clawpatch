@@ -784,11 +784,40 @@ function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "a
   );
 }
 
+// Map acpx promptResult.stopReason -> ClawpatchError code/exit pair.
+// `end_turn` is the only successful reason; everything else surfaces as a
+// typed error so callers can distinguish cancellation / refusal / truncation
+// from an actual envelope-shape regression.
+//
+// Source: acpx/src/runtime/engine/manager.ts emits the terminal JSON-RPC
+// response `{"jsonrpc":"2.0","id":N,"result":{"stopReason":<reason>,...}}`
+// for every `session/prompt`. Known reasons in acpx 0.8.0 / claude-agent-acp
+// 0.31.4 are `end_turn | cancelled | refusal | max_tokens` (plus
+// `max_turns_exceeded`, surfaced for the agent-driven turn loop).
+const ACPX_STOP_REASON_CODES: Record<string, string> = {
+  cancelled: "agent-cancelled",
+  refusal: "agent-refused",
+  max_tokens: "agent-truncated",
+  max_turns_exceeded: "agent-truncated",
+};
+const ACPX_STOP_EXIT_CODES: Record<string, number> = {
+  cancelled: 6,
+  refusal: 7,
+  max_tokens: 8,
+  max_turns_exceeded: 8,
+};
+
 export function extractAcpxJson(stdout: string): unknown {
   const toolCandidates: string[] = [];
   const messageChunks: string[] = [];
   const thoughtChunks: string[] = [];
   const observedKinds = new Set<string>();
+  // Last-seen terminal JSON-RPC response envelope: `{id, result: {stopReason, ...}}`.
+  // acpx emits exactly one per `session/prompt` turn (see
+  // acpx/src/runtime/engine/manager.ts). If this is anything other than
+  // "end_turn" the agent is telling us the turn produced no answer, and we
+  // should surface a typed error instead of trying to parse chunks.
+  let terminalStopReason: string | undefined;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
@@ -796,6 +825,8 @@ export function extractAcpxJson(stdout: string): unknown {
     }
     let env: {
       method?: string;
+      id?: unknown;
+      result?: { stopReason?: unknown };
       params?: {
         update?: {
           sessionUpdate?: string;
@@ -808,6 +839,17 @@ export function extractAcpxJson(stdout: string): unknown {
       env = JSON.parse(trimmed);
     } catch {
       continue;
+    }
+    if (
+      env !== null &&
+      typeof env === "object" &&
+      Object.prototype.hasOwnProperty.call(env, "id") &&
+      env.result !== undefined &&
+      env.result !== null &&
+      typeof env.result === "object" &&
+      typeof env.result.stopReason === "string"
+    ) {
+      terminalStopReason = env.result.stopReason;
     }
     if (env.method !== "session/update") {
       continue;
@@ -833,15 +875,33 @@ export function extractAcpxJson(stdout: string): unknown {
       toolCandidates.push(update.output);
     }
   }
+  // Step 1: if acpx terminated the turn with anything other than end_turn,
+  // surface that directly. No chunk-parsing — the agent already told us
+  // there is no answer in this turn.
+  if (terminalStopReason !== undefined && terminalStopReason !== "end_turn") {
+    const code = ACPX_STOP_REASON_CODES[terminalStopReason] ?? "agent-cancelled";
+    const exit = ACPX_STOP_EXIT_CODES[terminalStopReason] ?? 8;
+    throw new ClawpatchError(
+      `acpx prompt did not complete: stopReason="${terminalStopReason}". ` +
+        `Observed envelope kinds: [${[...observedKinds].join(", ")}].`,
+      exit,
+      code,
+    );
+  }
   const candidates = [
     ...(messageChunks.length > 0 ? [messageChunks.join("")] : []),
     ...toolCandidates.toReversed(),
     ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
   ];
   if (candidates.length === 0) {
+    const stopReasonNote =
+      terminalStopReason === "end_turn"
+        ? `acpx reported stopReason=end_turn but emitted no message chunks. ` +
+          `This is a clawpatch parser bug or a prompt that produced only tool calls. `
+        : ``;
     throw new ClawpatchError(
-      `acpx provider produced no extractable text. Observed envelope kinds: ` +
-        `[${[...observedKinds].join(", ")}]. ` +
+      `acpx provider produced no extractable text. ${stopReasonNote}` +
+        `Observed envelope kinds: [${[...observedKinds].join(", ")}]. ` +
         `acpx envelope shape may have changed since clawpatch was tested ` +
         `against ${ACPX_TESTED_VERSIONS}. Check the installed acpx version.`,
       8,

@@ -11,6 +11,7 @@
 - Fixed first-time `clawpatch open-pr` branch creation to start from the recorded patch base.
 - Fixed command execution so providers that exit before reading stdin do not surface benign `EPIPE` errors.
 - Fixed `clawpatch ci --since` empty-review output so it reports `reviewed: 0`.
+- Fixed acpx provider error reporting by reading the terminal `result.stopReason` envelope and surfacing non-`end_turn` reasons as typed `ClawpatchError` codes (`agent-cancelled`, `agent-refused`, `agent-truncated`) instead of opaque `malformed-output`.
 - Improved OpenCode malformed JSON diagnostics with output length, event kinds, and a bounded preview, thanks @rohitjavvadi.
 - Fixed Express route mapping for aliased Router imports that follow block comment banners, thanks @rohitjavvadi.
 - Fixed Bun package-manager detection to recognize the text `bun.lock` lockfile, thanks @austinm911.
