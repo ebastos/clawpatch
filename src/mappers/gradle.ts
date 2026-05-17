@@ -522,8 +522,17 @@ async function kotlinRoleSeeds(
       projectIndex.packages,
       projectIndex.packageTypes,
     );
+    const hasStrongServerRole =
+      !tags.includes("android") &&
+      frameworkEvidence.some(
+        (item) =>
+          item.confidence === "high" &&
+          item.role !== "server-framework-component" &&
+          item.role !== "server-extension-boundary",
+      );
     const pathEvidence = kotlinPathRoleEvidence(filePath, tags).filter(
       (item) =>
+        !hasStrongServerRole &&
         !frameworkEvidence.some((evidenceItem) => evidenceItem.role === item.role) &&
         !(
           tags.includes("android") &&
@@ -905,6 +914,17 @@ function kotlinFrameworkRoleEvidence(
       evidence.push({
         role: "server-persistence-boundary",
         reason: `persistence import ${full}`,
+        confidence: "high",
+      });
+    }
+    if (
+      !isAndroid &&
+      (full.startsWith("org.springframework.context.annotation.") ||
+        full.startsWith("org.springframework.boot.context.properties."))
+    ) {
+      evidence.push({
+        role: "server-configuration",
+        reason: `configuration import ${full}`,
         confidence: "high",
       });
     }

@@ -3194,6 +3194,80 @@ describe("mapFeatures", () => {
     );
   });
 
+  it("does not add path-only roles to strong Kotlin server roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-strong-role-path-fallback-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/network/OrderController.kt",
+      [
+        "package com.example.network",
+        "",
+        "import org.springframework.web.bind.annotation.RestController",
+        "",
+        "@RestController",
+        "class OrderController",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-web-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/network/OrderController.kt",
+          ),
+      ),
+    ).toBe(true);
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-external-client" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/network/OrderController.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("maps Kotlin Spring configuration imports as configuration roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-spring-config-import-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/config/PropsConfig.kt",
+      [
+        "package com.example.config",
+        "",
+        "import org.springframework.boot.context.properties.EnableConfigurationProperties",
+        "",
+        "@EnableConfigurationProperties(AppProps::class)",
+        "class PropsConfig",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const configuration = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-configuration" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/config/PropsConfig.kt",
+        ),
+    );
+
+    expect(configuration?.ownedFiles[0]?.reason).toContain(
+      "configuration import org.springframework.boot.context.properties.EnableConfigurationProperties",
+    );
+  });
+
   it("keeps Kotlin feature IDs stable when confidence changes", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-role-id-stability-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
