@@ -1915,11 +1915,22 @@ async function collectGradleModules(
     if (!childInfo.isDirectory() || childInfo.isSymbolicLink()) {
       continue;
     }
+    if (await hasGradleSettings(root, child)) {
+      continue;
+    }
     if ((await gradleBuildFile(root, child)) !== null) {
       modules.add(child);
     }
     await collectGradleModules(root, child, remainingDepth - 1, modules);
   }
+}
+
+async function hasGradleSettings(root: string, moduleRoot: string): Promise<boolean> {
+  const full = moduleRoot === "." ? root : join(root, moduleRoot);
+  return (
+    (await pathExists(join(full, "settings.gradle"))) ||
+    (await pathExists(join(full, "settings.gradle.kts")))
+  );
 }
 
 async function gradleBuildFile(root: string, moduleRoot: string): Promise<string | null> {
@@ -2350,7 +2361,9 @@ function gradlePluginInvocationEnd(source: string, start: number): number {
     }
     if (
       char === "\n" &&
-      /^\s*(?:id\s*(?:\(|["'])|alias\s*\(|kotlin\s*\(|`[^`]+`)/u.test(source.slice(index + 1))
+      /^\s*(?:id\s*(?:\(|["'])|alias\s*\(|kotlin\s*\(|`[^`]+`|[A-Za-z_][A-Za-z0-9_]*\s+(?:apply|version)\b)/u.test(
+        source.slice(index + 1),
+      )
     ) {
       return index;
     }

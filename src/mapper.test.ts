@@ -3642,6 +3642,48 @@ describe("mapFeatures", () => {
     expect(framework?.ownedFiles[0]?.reason).toContain("org.scheduler.JobFactoryBase");
   });
 
+  it("does not let nested Gradle roots suppress outer Kotlin wildcard evidence", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-nested-root-local-type-");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/JobFactory.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "import org.scheduler.*",
+        "",
+        "class JobFactory : JobFactoryBase()",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(root, "nested/settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "nested/build.gradle.kts",
+      'plugins { id("org.jetbrains.kotlin.jvm") }\n',
+    );
+    await writeFixture(
+      root,
+      "nested/src/main/kotlin/org/scheduler/JobFactoryBase.kt",
+      "package org.scheduler\nclass JobFactoryBase\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const framework = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-framework-component" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/jobs/JobFactory.kt",
+        ),
+    );
+
+    expect(framework?.ownedFiles[0]?.reason).toContain(
+      "inherits external type org.scheduler.JobFactoryBase",
+    );
+  });
+
   it("does not treat Kotlin stdlib return types as framework components", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-stdlib-type-map-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
@@ -4446,6 +4488,42 @@ describe("mapFeatures", () => {
         "plugins {",
         '  id("com.android.application") version "8.0"',
         "  `java-library` apply false",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/ui/MainViewModel.kt",
+      [
+        "package com.example.ui",
+        "",
+        "import androidx.lifecycle.ViewModel",
+        "",
+        "class MainViewModel : ViewModel()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const viewModel = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin Android role view model "),
+    );
+
+    expect(viewModel?.source).toBe("kotlin-android-role-view-model");
+  });
+
+  it("keeps Kotlin DSL Android plugin declarations before bare accessor apply false entries", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-accessor-apply-false-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "build.gradle.kts",
+      [
+        "plugins {",
+        '  id("com.android.application") version "8.0"',
+        "  application apply false",
         "}",
         "",
       ].join("\n"),
