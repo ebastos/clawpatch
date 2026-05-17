@@ -3769,7 +3769,6 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
-
   it("ignores Kotlin role markers inside nested block comments", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-nested-comment-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
