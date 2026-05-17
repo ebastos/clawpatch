@@ -14,6 +14,7 @@
 - Improved OpenCode malformed JSON diagnostics with output length, event kinds, and a bounded preview, thanks @rohitjavvadi.
 - Fixed Express route mapping for aliased Router imports that follow block comment banners, thanks @rohitjavvadi.
 - Fixed Bun package-manager detection to recognize the text `bun.lock` lockfile, thanks @austinm911.
+- Improved provider schema validation failures so `run.errors[].message` shows a one-line `path=value (code, expected ...)` summary instead of a multi-kilobyte JSON-encoded zod issue blob.
 
 ## 0.3.0 - 2026-05-18
 
