@@ -1365,7 +1365,13 @@ function methodReturnEvidence(info: JavaFileInfo, projectPackages: Set<string>):
 }
 
 function isExternalProjectImport(full: string, projectPackages: Set<string>): boolean {
-  if (/^(?:java|javax|jakarta)\./u.test(full)) {
+  if (/^(?:java|kotlin)\./u.test(full)) {
+    return false;
+  }
+  if (
+    /^(?:javax|jakarta)\./u.test(full) &&
+    !/^(?:javax|jakarta)\.(?:servlet|ws\.rs)\./u.test(full)
+  ) {
     return false;
   }
   for (const packageName of projectPackages) {

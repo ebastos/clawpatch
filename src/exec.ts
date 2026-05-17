@@ -9,6 +9,19 @@ export async function runCommand(
   input?: string,
   options: { trimOutput?: boolean } = {},
 ): Promise<CommandResult> {
+  const result = await runCommandRaw(command, cwd, input);
+  return {
+    ...result,
+    stdout: options.trimOutput === false ? result.stdout : trimOutput(result.stdout),
+    stderr: options.trimOutput === false ? result.stderr : trimOutput(result.stderr),
+  };
+}
+
+export async function runCommandRaw(
+  command: string,
+  cwd: string,
+  input?: string,
+): Promise<CommandResult> {
   const started = Date.now();
   const child = spawn(command, {
     cwd,
@@ -47,8 +60,8 @@ export async function runCommand(
     cwd,
     exitCode,
     durationMs: Date.now() - started,
-    stdout: options.trimOutput === false ? stdout : trimOutput(stdout),
-    stderr: options.trimOutput === false ? stderr : trimOutput(stderr),
+    stdout,
+    stderr,
   };
 }
 
@@ -57,11 +70,13 @@ export async function runCommandArgs(
   args: string[],
   cwd: string,
   input?: string,
+  options: { trimOutput?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): Promise<CommandResult> {
   const started = Date.now();
   const spawnSpec = commandSpawnSpec(program, args);
   const child = spawn(spawnSpec.program, spawnSpec.args, {
     cwd,
+    env: options.env === undefined ? process.env : { ...process.env, ...options.env },
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
@@ -98,8 +113,8 @@ export async function runCommandArgs(
     cwd,
     exitCode,
     durationMs: Date.now() - started,
-    stdout: trimOutput(stdout),
-    stderr: trimOutput(stderr),
+    stdout: options.trimOutput === false ? stdout : trimOutput(stdout),
+    stderr: options.trimOutput === false ? stderr : trimOutput(stderr),
   };
 }
 

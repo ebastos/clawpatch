@@ -18,7 +18,14 @@ import {
   projectTargetCommand,
 } from "./projects.js";
 import type { NodePackageJson, NodeProjectInfo } from "./projects.js";
-import { FeatureSeed, MapperContext, SeedFileRef, SeedTestRef } from "./types.js";
+import type { WorkspaceTaskGraph } from "./task-graph.js";
+import {
+  FeatureSeed,
+  MapperContext,
+  SeedFileRef,
+  SeedTestRef,
+  suppressedTestCommandTag,
+} from "./types.js";
 
 type PackageInfo = NodeProjectInfo & {
   packageJsonPath: string;
@@ -40,8 +47,8 @@ export async function nodeSeeds(root: string, context: MapperContext): Promise<F
   const seeds: FeatureSeed[] = [];
 
   for (const info of packages) {
-    seeds.push(...(await packageSeeds(root, info)));
-    seeds.push(...(await sourceGroupSeeds(root, info)));
+    seeds.push(...(await packageSeeds(root, info, context.taskGraph)));
+    seeds.push(...(await sourceGroupSeeds(root, info, context.taskGraph)));
   }
 
   return seeds;
@@ -51,14 +58,21 @@ function hasNodePackage(project: NodeProjectInfo): project is PackageInfo {
   return project.packageJsonPath !== null && project.packageJson !== null;
 }
 
-async function packageSeeds(root: string, info: PackageInfo): Promise<FeatureSeed[]> {
+async function packageSeeds(
+  root: string,
+  info: PackageInfo,
+  taskGraph: WorkspaceTaskGraph,
+): Promise<FeatureSeed[]> {
   const seeds: FeatureSeed[] = [];
   const packageName = projectDisplayName(info);
   const packageTags = ["node", "package", ...projectTags(info)];
   if (info.root !== ".") {
     packageTags.push("workspace");
   }
-  const testCommand = projectTargetCommand(info, "test");
+  const testCommand = projectTargetCommand(info, "test", taskGraph);
+  if (testCommand === null) {
+    packageTags.push(suppressedTestCommandTag);
+  }
 
   const manifestSeed: FeatureSeed = {
     title: `Node package ${packageName}`,
@@ -94,9 +108,9 @@ async function packageSeeds(root: string, info: PackageInfo): Promise<FeatureSee
       symbol: null,
       route: null,
       command,
-      tags: ["node", "cli"],
+      tags: ["node", "cli", ...(testCommand === null ? [suppressedTestCommandTag] : [])],
       trustBoundaries: ["user-input", "filesystem", "process-exec"],
-      ...(testCommand === null ? {} : { testCommand }),
+      ...(testCommand === undefined ? {} : { testCommand }),
     });
   }
 
@@ -120,7 +134,12 @@ async function packageSeeds(root: string, info: PackageInfo): Promise<FeatureSee
       symbol: script,
       route: null,
       command: script,
-      tags: ["node", "package-script", ...projectTags(info)],
+      tags: [
+        "node",
+        "package-script",
+        ...projectTags(info),
+        ...(testCommand === null ? [suppressedTestCommandTag] : []),
+      ],
       trustBoundaries: script === "test" ? [] : ["process-exec", "filesystem"],
       skipNearbyTests: true,
     });
@@ -130,9 +149,13 @@ async function packageSeeds(root: string, info: PackageInfo): Promise<FeatureSee
   return seeds;
 }
 
-async function sourceGroupSeeds(root: string, info: PackageInfo): Promise<FeatureSeed[]> {
+async function sourceGroupSeeds(
+  root: string,
+  info: PackageInfo,
+  taskGraph: WorkspaceTaskGraph,
+): Promise<FeatureSeed[]> {
   const packageName = projectDisplayName(info);
-  const testCommand = projectTargetCommand(info, "test");
+  const testCommand = projectTargetCommand(info, "test", taskGraph);
   const testFiles = await packageTestFiles(root, info);
   const railsPackage = await isRailsPackage(root, info.root);
   const seeds: FeatureSeed[] = [];
@@ -150,7 +173,7 @@ async function sourceGroupSeeds(root: string, info: PackageInfo): Promise<Featur
       continue;
     }
     for (const group of partitionSourceFiles(sourceRoot, files, sourceGroupMaxOwnedFiles)) {
-      const tests = associatedTests(group.files, testFiles, testCommand);
+      const tests = associatedTests(group.files, testFiles, testCommand ?? null);
       seeds.push({
         title: `Node source ${group.label}`,
         summary:
@@ -173,9 +196,15 @@ async function sourceGroupSeeds(root: string, info: PackageInfo): Promise<Featur
           ...tests.map((test) => ({ path: test.path, reason: "associated test" })),
         ]),
         tests,
-        tags: ["node", "typescript", "source-group", ...projectTags(info)],
+        tags: [
+          "node",
+          "typescript",
+          "source-group",
+          ...projectTags(info),
+          ...(testCommand === null ? [suppressedTestCommandTag] : []),
+        ],
         trustBoundaries: packageTrustBoundaries(`${packageName} ${group.label}`),
-        testCommand,
+        ...(testCommand === undefined ? {} : { testCommand }),
         skipNearbyTests: true,
       });
     }

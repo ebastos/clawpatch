@@ -51,6 +51,8 @@ validation commands and records a patch attempt under `.clawpatch/`.
   workspace patterns
 - Nx project metadata from `project.json`, including project-scoped validation
   targets
+- Turborepo task metadata for workspace-aware validation commands and feature
+  context
 - Next.js `app/` and `pages/` routes, including routes inside monorepo apps
 - React Router routes and React components
 - Go package slices from `go list ./...`, including command packages
@@ -63,6 +65,8 @@ validation commands and records a patch attempt under `.clawpatch/`.
 - Ruby project metadata, executables, source groups, RSpec/Minitest suites
 - Rust `src/main.rs`, `src/bin/*.rs`, `src/lib.rs`, `crates/*`, and
   `tests/*.rs`
+- C/C++ standalone `main()` files, CMake `add_executable` / `add_library`
+  targets, and autotools `bin_PROGRAMS` / `lib_LTLIBRARIES` targets
 - Python project metadata, console scripts, bounded source groups, pytest suites,
   and Flask/FastAPI routes
 - SwiftPM `Sources/*` targets and `Tests/*` suites
@@ -89,10 +93,11 @@ working tree during the explicit fix command.
 Supported provider names today:
 
 - `codex`: local Codex CLI
+- `acpx`: any ACP-compatible coding agent (Codex / Claude / Pi / Gemini / ...) via openclaw/acpx
+- `grok`: local Grok Build CLI
+- `opencode`: local OpenCode CLI
 - `mock`: deterministic test provider
 - `mock-fail`: failure test provider
-
-Direct OpenAI, Claude, Gemini, and provider panels are not implemented yet.
 
 ## Commands
 

@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { detectProject } from "./detect.js";
 import { mapFeatures } from "./mapper.js";
+import { discoverNodeProjects } from "./mappers/projects.js";
+import { turboTaskGraph } from "./mappers/turbo.js";
 import { fixtureRoot, writeFixture } from "./test-helpers.js";
 
 describe("mapFeatures", () => {
@@ -138,6 +140,25 @@ describe("mapFeatures", () => {
     expect(titles).not.toContain("Route /_error");
   });
 
+  it("maps application routes in vendor directories", async () => {
+    const root = await fixtureRoot("clawpatch-next-vendor-route-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "fixture-app", dependencies: { next: "1.0.0" } }, null, 2),
+    );
+    await writeFixture(
+      root,
+      "app/vendor/page.tsx",
+      "export default function VendorPage() { return null; }\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).toContain("Route /vendor");
+  });
+
   it("maps Next routes inside Nx workspace projects", async () => {
     const root = await fixtureRoot("clawpatch-map-next-nx-workspace-");
     await writeFixture(
@@ -269,6 +290,43 @@ describe("mapFeatures", () => {
     );
   });
 
+  it("uses package-local commands when no task graph adapter is present", async () => {
+    const root = await fixtureRoot("clawpatch-task-graph-fallback-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "workspace-root", workspaces: ["apps/*"] }, null, 2),
+    );
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          scripts: { test: "vitest run", build: "next build" },
+          dependencies: { next: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/web/app/page.tsx",
+      "export default function Page() { return null; }\n",
+    );
+    await writeFixture(root, "apps/web/app/page.test.tsx", "test('page', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const route = result.features.find((feature) => feature.title === "web route /");
+
+    expect(route?.tests).toEqual([
+      { path: "apps/web/app/page.test.tsx", command: "pnpm --dir apps/web test" },
+    ]);
+  });
+
   it("keeps Nx target commands on the workspace package manager", async () => {
     const root = await fixtureRoot("clawpatch-map-nx-root-package-manager-");
     await writeFixture(
@@ -349,6 +407,109 @@ describe("mapFeatures", () => {
     expect(route?.tests).toEqual([
       { path: "apps/web/src/pages/HomePage.test.tsx", command: "pnpm nx test web" },
     ]);
+  });
+
+  it("uses Turbo task commands for React route tests", async () => {
+    const root = await fixtureRoot("clawpatch-map-react-turbo-test-command-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "workspace-root", workspaces: ["apps/*"] }, null, 2),
+    );
+    await writeFixture(root, "pnpm-workspace.yaml", "packages:\n  - apps/*\n");
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(root, "turbo.json", JSON.stringify({ tasks: { test: {} } }, null, 2));
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          scripts: { test: "vitest run" },
+          dependencies: { react: "1.0.0", "react-router-dom": "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/web/src/App.tsx",
+      [
+        "import { Route, Routes } from 'react-router-dom';",
+        "import HomePage from './pages/HomePage';",
+        'export function App() { return <Routes><Route path="/home" element={<HomePage />} /></Routes>; }',
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "apps/web/src/pages/HomePage.tsx",
+      "export default function HomePage() { return null; }\n",
+    );
+    await writeFixture(root, "apps/web/src/pages/HomePage.test.tsx", "test('home', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const route = result.features.find((feature) => feature.title === "React route /home");
+
+    expect(route?.tests).toEqual([
+      { path: "apps/web/src/pages/HomePage.test.tsx", command: "pnpm turbo run test --filter web" },
+    ]);
+  });
+
+  it("suppresses fallback validation commands for persistent Turbo tasks", async () => {
+    const root = await fixtureRoot("clawpatch-turbo-persistent-task-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "workspace-root",
+          packageManager: "pnpm@10.0.0",
+          workspaces: ["apps/*"],
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(
+      root,
+      "turbo.json",
+      JSON.stringify({ tasks: { test: { cache: false, persistent: true } } }, null, 2),
+    );
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          scripts: { test: "vitest --watch" },
+          dependencies: { next: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/web/app/page.tsx",
+      "export default function Page() { return null; }\n",
+    );
+    await writeFixture(root, "apps/web/app/page.test.tsx", "test('page', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const route = result.features.find((feature) => feature.title === "web route /");
+    const webPackage = result.features.find((feature) => feature.title === "Node package web");
+    const webTestScript = result.features.find(
+      (feature) => feature.title === "Package script test (web)",
+    );
+
+    expect(route?.tests).toEqual([{ path: "apps/web/app/page.test.tsx", command: null }]);
+    expect(route?.tags).toContain("validation:test-suppressed");
+    expect(webPackage?.tags).toContain("validation:test-suppressed");
+    expect(webTestScript?.tags).toContain("validation:test-suppressed");
   });
 
   it("does not map src app-shaped routes without a Next project signal", async () => {
@@ -1063,6 +1224,234 @@ describe("mapFeatures", () => {
     ).toEqual([
       { path: "packages/core/src/index.test.ts", command: "pnpm --dir packages/core test" },
     ]);
+  });
+
+  it("parses Turbo task metadata for workspace validation commands", async () => {
+    const root = await fixtureRoot("clawpatch-turbo-task-graph-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "workspace-root",
+          packageManager: "pnpm@10.0.0",
+          workspaces: ["apps/*", "packages/*"],
+          scripts: { test: "vitest run root.test.ts" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(
+      root,
+      "apps/web/project.json",
+      JSON.stringify({ name: "web-app", targets: { test: {} } }, null, 2),
+    );
+    await writeFixture(
+      root,
+      "turbo.json",
+      JSON.stringify(
+        {
+          globalDependencies: ["package.json", "pnpm-lock.yaml"],
+          globalEnv: ["NODE_ENV"],
+          tasks: {
+            build: { dependsOn: ["^build"], outputs: ["dist/**", ".next/**"] },
+            "@scope/web#test": { dependsOn: ["^test"], outputs: ["coverage/**"] },
+            lint: {},
+            dev: { cache: false, persistent: true },
+            "@scope/ext#build": {
+              dependsOn: ["@scope/contracts#build"],
+              outputs: ["dist/**"],
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(root, "apps/web/package-lock.json", "{}\n");
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "@scope/web",
+          scripts: { build: "next build", test: "vitest run", lint: "biome check ." },
+          dependencies: { next: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "packages/contracts/package.json",
+      JSON.stringify(
+        { name: "@scope/contracts", scripts: { build: "tsc -p tsconfig.json" } },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/ext/package.json",
+      JSON.stringify({ name: "@scope/ext", scripts: { build: "vite build" } }, null, 2),
+    );
+
+    const projects = await discoverNodeProjects(root);
+    const graph = await turboTaskGraph(root, projects);
+    const webTest = graph.commands.find(
+      (command) => command.projectRoot === "apps/web" && command.task === "test",
+    );
+    const extBuild = graph.commands.find(
+      (command) => command.projectName === "@scope/ext" && command.task === "build",
+    );
+
+    expect(graph.runner).toBe("turbo");
+    expect(graph.globalDependencies).toEqual(["package.json", "pnpm-lock.yaml"]);
+    expect(graph.globalEnv).toEqual(["NODE_ENV"]);
+    expect(webTest?.projectName).toBe("web-app");
+    expect(webTest?.command).toBe("pnpm turbo run test --filter @scope/web");
+    expect(webTest?.metadata.dependsOn).toEqual(["^test"]);
+    expect(extBuild?.command).toBe("pnpm turbo run build --filter @scope/ext");
+    expect(extBuild?.metadata.dependsOn).toEqual(["@scope/contracts#build"]);
+    expect(graph.commands.some((command) => command.task === "dev")).toBe(false);
+    expect(
+      graph.commands.some(
+        (command) => command.projectName === "@scope/contracts" && command.task === "test",
+      ),
+    ).toBe(false);
+    expect(graph.commands.some((command) => command.projectRoot === ".")).toBe(false);
+  });
+
+  it("uses Turbo task commands for mapped workspace feature validation", async () => {
+    const root = await fixtureRoot("clawpatch-turbo-feature-validation-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "workspace-root",
+          packageManager: "pnpm@10.0.0",
+          workspaces: ["apps/*"],
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(
+      root,
+      "turbo.json",
+      JSON.stringify({ tasks: { test: { dependsOn: ["^test"] } } }, null, 2),
+    );
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          scripts: { test: "vitest run" },
+          dependencies: { next: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/web/app/page.tsx",
+      "export default function Page() { return null; }\n",
+    );
+    await writeFixture(root, "apps/web/app/page.test.tsx", "test('page', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const route = result.features.find((feature) => feature.title === "web route /");
+    const webSource = result.features.find(
+      (feature) => feature.title === "Node source apps/web/app",
+    );
+
+    expect(route?.tests).toEqual([
+      { path: "apps/web/app/page.test.tsx", command: "pnpm turbo run test --filter web" },
+    ]);
+    expect(webSource?.tests).toEqual([
+      { path: "apps/web/app/page.test.tsx", command: "pnpm turbo run test --filter web" },
+    ]);
+  });
+
+  it("keeps package-local validation for fallback packages outside the workspace graph", async () => {
+    const root = await fixtureRoot("clawpatch-turbo-non-workspace-package-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "workspace-root",
+          packageManager: "pnpm@10.0.0",
+          workspaces: ["packages/*"],
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(root, "pnpm-lock.yaml", "");
+    await writeFixture(root, "turbo.json", JSON.stringify({ tasks: { test: {} } }, null, 2));
+    await writeFixture(
+      root,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          scripts: { test: "vitest run" },
+          dependencies: { next: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "apps/web/app/page.tsx",
+      "export default function Page() { return null; }\n",
+    );
+    await writeFixture(root, "apps/web/app/page.test.tsx", "test('page', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const route = result.features.find((feature) => feature.title === "web route /");
+
+    expect(route?.tests).toEqual([
+      { path: "apps/web/app/page.test.tsx", command: "pnpm --dir apps/web test" },
+    ]);
+  });
+
+  it("maps turbo config and skips versioned virtualenv directories", async () => {
+    const root = await fixtureRoot("clawpatch-turbo-config-venv-");
+    await writeFixture(root, "package.json", JSON.stringify({ name: "root" }, null, 2));
+    await writeFixture(root, "turbo.json", JSON.stringify({ tasks: { test: {} } }, null, 2));
+    await writeFixture(root, "apps/sandbox/pyproject.toml", "[project]\nname = 'sandbox'\n");
+    await writeFixture(
+      root,
+      "apps/sandbox/src/main.py",
+      "from fastapi import FastAPI\napp = FastAPI()\n",
+    );
+    await writeFixture(
+      root,
+      "apps/sandbox/.venv-311/lib/python/site-packages/bad.py",
+      "raise RuntimeError()\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const ownedPaths = result.features.flatMap((feature) =>
+      feature.ownedFiles.map((file) => file.path),
+    );
+
+    expect(titles).toContain("Project config turbo.json");
+    expect(ownedPaths.some((path) => path.includes(".venv-311"))).toBe(false);
   });
 
   it("uses package-local locks for fallback Node package roots", async () => {
@@ -2311,7 +2700,6 @@ describe("mapFeatures", () => {
       reason: "direct import",
     });
   });
-
   it("maps nested SwiftPM, Apple, and Android Gradle app surfaces", async () => {
     const root = await fixtureRoot("clawpatch-native-app-map-");
     await writeFixture(root, "package.json", JSON.stringify({ name: "native-root" }, null, 2));
@@ -2424,10 +2812,30 @@ describe("mapFeatures", () => {
     await writeFixture(
       root,
       "build.gradle.kts",
-      'plugins { id("com.android.application") version "1.0" apply false }\n',
+      'plugins { id("com.android.application").version("1.0").apply(false) }\n',
     );
-    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.application") }\n');
-    await writeFixture(root, "app/src/main/AndroidManifest.xml", "<manifest />\n");
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/RootController.kt",
+      [
+        "package com.example.api",
+        "",
+        "import org.springframework.web.bind.annotation.GetMapping",
+        "import org.springframework.web.bind.annotation.RestController",
+        "",
+        "@RestController",
+        "class RootController {",
+        '  @GetMapping("/root")',
+        '  fun root(): String = "ok"',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "app/build.gradle.kts",
+      "plugins { alias(libs.plugins.android.application) }\n",
+    );
     await writeFixture(
       root,
       "app/src/main/kotlin/com/example/ui/MainActivity.kt",
@@ -2447,11 +2855,31 @@ describe("mapFeatures", () => {
     );
     await writeFixture(
       root,
+      "app/src/main/kotlin/com/example/ui/ProfileFragment.kt",
+      [
+        "package com.example.ui",
+        "",
+        "import dagger.hilt.android.AndroidEntryPoint",
+        "",
+        "@AndroidEntryPoint",
+        "class ProfileFragment : BaseFragment()",
+        "",
+        "open class BaseFragment",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/ui/SettingsActivity.kt",
+      "package com.example.ui\nclass SettingsActivity : androidx.activity.ComponentActivity()\n",
+    );
+    await writeFixture(
+      root,
       "app/src/main/kotlin/com/example/ui/MainViewModel.kt",
       [
         "package com.example.ui",
         "",
-        "import androidx.lifecycle.ViewModel",
+        "import androidx.lifecycle.*",
         "",
         "class MainViewModel : ViewModel()",
         "",
@@ -2468,6 +2896,18 @@ describe("mapFeatures", () => {
         "",
         "@Database(entities = [], version = 1)",
         "abstract class AppDatabase : RoomDatabase()",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/data/UserRepository.kt",
+      [
+        "package com.example.data",
+        "",
+        "import javax.inject.Inject",
+        "",
+        "class UserRepository @Inject constructor()",
         "",
       ].join("\n"),
     );
@@ -2522,6 +2962,7 @@ describe("mapFeatures", () => {
     const project = await detectProject(root);
     const result = await mapFeatures(root, project, []);
     const titles = result.features.map((feature) => feature.title);
+    const gradleModule = result.features.find((feature) => feature.title === "Gradle module app");
     const ui = result.features.find((feature) =>
       feature.title.startsWith("Kotlin Android role UI entrypoint "),
     );
@@ -2537,15 +2978,32 @@ describe("mapFeatures", () => {
     const di = result.features.find((feature) =>
       feature.title.startsWith("Kotlin Android role dependency injection "),
     );
+    const rootModule = result.features.find((feature) => feature.title === "Gradle module .");
+    const rootWeb = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-web-entrypoint" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/api/RootController.kt",
+        ),
+    );
 
     expect(project.detected.languages).toContain("kotlin");
     expect(project.detected.packageManagers).toContain("gradle");
     expect(titles).toContain("Gradle module app");
+    expect(rootModule?.tags).not.toContain("android");
+    expect(rootWeb?.source).toBe("kotlin-server-role-web-entrypoint");
+    expect(gradleModule?.tags).toEqual(expect.arrayContaining(["gradle", "kotlin", "android"]));
     expect(ui?.source).toBe("kotlin-android-role-ui-entrypoint");
     expect(ui?.kind).toBe("ui-flow");
     expect(ui?.confidence).toBe("high");
     expect(ui?.ownedFiles.map((file) => file.path)).toContain(
       "app/src/main/kotlin/com/example/ui/MainActivity.kt",
+    );
+    expect(ui?.ownedFiles.map((file) => file.path)).toContain(
+      "app/src/main/kotlin/com/example/ui/ProfileFragment.kt",
+    );
+    expect(ui?.ownedFiles.map((file) => file.path)).toContain(
+      "app/src/main/kotlin/com/example/ui/SettingsActivity.kt",
     );
     expect(ui?.tests).toEqual([
       { path: "app/src/test/kotlin/com/example/ui/MainActivityTest.kt", command: null },
@@ -2555,6 +3013,9 @@ describe("mapFeatures", () => {
       "app/src/main/kotlin/com/example/ui/MainActivity.kt",
     );
     expect(data?.trustBoundaries).toEqual(expect.arrayContaining(["database", "serialization"]));
+    expect(data?.ownedFiles.map((file) => file.path)).toContain(
+      "app/src/main/kotlin/com/example/data/UserRepository.kt",
+    );
     expect(client?.trustBoundaries).toEqual(
       expect.arrayContaining(["network", "external-api", "serialization"]),
     );
@@ -2590,13 +3051,24 @@ describe("mapFeatures", () => {
     );
     await writeFixture(
       root,
+      "src/main/kotlin/com/example/api/QualifiedController.kt",
+      [
+        "package com.example.api",
+        "",
+        "@org.springframework.web.bind.annotation.RestController",
+        "class QualifiedController",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
       "src/main/kotlin/com/example/app/BillingService.kt",
       [
         "package com.example.app",
         "",
-        "import org.springframework.stereotype.Component",
+        "import jakarta.inject.Singleton",
         "",
-        "@Component",
+        "@Singleton",
         "class BillingService",
         "",
       ].join("\n"),
@@ -2628,6 +3100,31 @@ describe("mapFeatures", () => {
     );
     await writeFixture(
       root,
+      "src/main/kotlin/com/example/client/GitHubApi.kt",
+      [
+        "package com.example.client",
+        "",
+        "import retrofit2.http.GET",
+        "",
+        "interface GitHubApi {",
+        '  @GET("/users")',
+        "  fun users(): String",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/network/FallbackClient.kt",
+      "package com.example.network\nclass FallbackClient\n",
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/network/PaymentClient.kt",
+      "package com.example.network\ninterface PaymentClient\n",
+    );
+    await writeFixture(
+      root,
       "src/main/kotlin/com/example/config/AppConfig.kt",
       [
         "package com.example.config",
@@ -2637,15 +3134,10 @@ describe("mapFeatures", () => {
         "",
         "@Configuration",
         "class AppConfig {",
-        '  @Bean fun appName(): String = "orders"',
+        '  @Bean fun name(): String = "orders"',
         "}",
         "",
       ].join("\n"),
-    );
-    await writeFixture(
-      root,
-      "src/main/kotlin/com/example/network/FallbackClient.kt",
-      "package com.example.network\nclass FallbackClient\n",
     );
     await writeFixture(
       root,
@@ -2664,68 +3156,42 @@ describe("mapFeatures", () => {
     const persistence = result.features.find((feature) =>
       feature.title.startsWith("Kotlin server role persistence boundary "),
     );
-    const config = result.features.find((feature) =>
-      feature.title.startsWith("Kotlin server role configuration "),
-    );
     const clientFeatures = result.features.filter((feature) =>
       feature.title.startsWith("Kotlin server role external client "),
     );
+    const configuration = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role configuration "),
+    );
 
     expect(web?.source).toBe("kotlin-server-role-web-entrypoint");
+    expect(web?.ownedFiles.map((file) => file.path)).not.toContain(
+      "src/main/kotlin/com/example/client/GitHubApi.kt",
+    );
+    expect(web?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/api/QualifiedController.kt",
+    );
     expect(web?.tests).toEqual([
       { path: "src/test/kotlin/com/example/api/OrderControllerTest.kt", command: null },
     ]);
     expect(service?.source).toBe("kotlin-server-role-application-service");
-    expect(service?.ownedFiles.map((file) => file.path)).toContain(
-      "src/main/kotlin/com/example/app/BillingService.kt",
-    );
     expect(persistence?.source).toBe("kotlin-server-role-persistence-boundary");
-    expect(config?.source).toBe("kotlin-server-role-configuration");
-    expect(config?.ownedFiles.map((file) => file.path)).toContain(
+    expect(configuration?.source).toBe("kotlin-server-role-configuration");
+    expect(configuration?.ownedFiles.map((file) => file.path)).toContain(
       "src/main/kotlin/com/example/config/AppConfig.kt",
     );
-    expect(clientFeatures.some((feature) => feature.confidence === "high")).toBe(true);
-    expect(
-      clientFeatures.flatMap((feature) => feature.ownedFiles.map((file) => file.path)),
-    ).toEqual(
+    const clientFiles = clientFeatures.flatMap((feature) =>
+      feature.ownedFiles.map((file) => file.path),
+    );
+    expect(clientFeatures).toHaveLength(1);
+    expect(clientFeatures[0]?.confidence).toBe("high");
+    expect(clientFiles).toEqual(
       expect.arrayContaining([
+        "src/main/kotlin/com/example/client/GitHubApi.kt",
         "src/main/kotlin/com/example/client/RemoteClient.kt",
         "src/main/kotlin/com/example/network/FallbackClient.kt",
+        "src/main/kotlin/com/example/network/PaymentClient.kt",
       ]),
     );
-  });
-
-  it("ignores Kotlin role markers inside nested block comments", async () => {
-    const root = await fixtureRoot("clawpatch-kotlin-nested-comment-");
-    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
-    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
-    await writeFixture(
-      root,
-      "src/main/kotlin/com/example/Foo.kt",
-      [
-        "package com.example",
-        "",
-        "/* outer",
-        "  /* inner */",
-        "  import okhttp3.OkHttpClient",
-        "  import org.springframework.web.bind.annotation.RestController",
-        "  @RestController",
-        "*/",
-        "class Foo",
-        "",
-      ].join("\n"),
-    );
-
-    const project = await detectProject(root);
-    const result = await mapFeatures(root, project, []);
-
-    expect(
-      result.features.some(
-        (feature) =>
-          feature.source === "kotlin-server-role-external-client" ||
-          feature.source === "kotlin-server-role-web-entrypoint",
-      ),
-    ).toBe(false);
   });
 
   it("keeps Kotlin feature IDs stable when confidence changes", async () => {
@@ -2736,6 +3202,11 @@ describe("mapFeatures", () => {
       root,
       "src/main/kotlin/com/example/network/FallbackClient.kt",
       "package com.example.network\nclass FallbackClient\n",
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/network/BackupClient.kt",
+      "package com.example.network\nclass BackupClient\n",
     );
 
     const project = await detectProject(root);
@@ -2773,6 +3244,563 @@ describe("mapFeatures", () => {
     expect(fallbackBefore?.confidence).toBe("medium");
     expect(fallbackAfter?.confidence).toBe("high");
     expect(fallbackAfter?.featureId).toBe(fallbackBefore?.featureId);
+    expect(fallbackAfter?.ownedFiles.map((file) => file.path).toSorted()).toEqual([
+      "src/main/kotlin/com/example/network/BackupClient.kt",
+      "src/main/kotlin/com/example/network/FallbackClient.kt",
+    ]);
+  });
+
+  it("does not infer Android roles from non-Android Gradle module paths", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-path-leak-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "apps/android/build.gradle.kts",
+      [
+        'plugins { id("org.jetbrains.kotlin.jvm") }',
+        "plugins {",
+        "  alias(libs.plugins.android.application)",
+        "    .apply(false)",
+        "}",
+        '// id("com.android.application")',
+        '/* android { namespace = "example" } */',
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "apps/android/src/main/kotlin/com/example/di/Injector.kt",
+      "package com.example.di\nclass Injector\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some((feature) => feature.source.startsWith("kotlin-android-role-")),
+    ).toBe(false);
+    expect(
+      result.features.find((feature) => feature.title === "Gradle module apps/android")?.tags,
+    ).not.toContain("android");
+  });
+
+  it("detects legacy Android Gradle plugin application syntax", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-legacy-gradle-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle", 'apply plugin: "com.android.library"\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/ui/MainActivity.kt",
+      [
+        "package com.example.ui",
+        "",
+        "import androidx.activity.ComponentActivity",
+        "",
+        "class MainActivity : ComponentActivity()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.find((feature) => feature.title === "Gradle module .")?.tags).toContain(
+      "android",
+    );
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-android-role-ui-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/ui/MainActivity.kt",
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat non-entrypoint Android framework imports as UI roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-non-ui-import-");
+    await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
+    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.library") }\n');
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/alerts/Notifier.kt",
+      [
+        "package com.example.alerts",
+        "",
+        "import android.app.Notification",
+        "import android.app.PendingIntent",
+        "",
+        "class Notifier(private val notification: Notification, private val intent: PendingIntent)",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-android-role-ui-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "app/src/main/kotlin/com/example/alerts/Notifier.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat project-local Android supertype names as framework roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-local-supertype-");
+    await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
+    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.library") }\n');
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/domain/Service.kt",
+      "package com.example.domain\nopen class Service\n",
+    );
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/domain/Billing.kt",
+      "package com.example.domain\nclass Billing : Service()\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-android-role-ui-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "app/src/main/kotlin/com/example/domain/Billing.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat Compose runtime state imports as UI roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-compose-state-");
+    await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
+    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.library") }\n');
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/state/CounterState.kt",
+      [
+        "package com.example.state",
+        "",
+        "import androidx.compose.runtime.mutableStateOf",
+        "",
+        "class CounterState {",
+        "  val count = mutableStateOf(0)",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-android-role-ui-entrypoint" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "app/src/main/kotlin/com/example/state/CounterState.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("maps Kotlin role evidence from wildcard imports", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-wildcard-imports-");
+    await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/client/RemoteClient.kt",
+      [
+        "package com.example.client",
+        "",
+        "import retrofit2.*",
+        "",
+        "class RemoteClient(private val retrofit: Retrofit)",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.application") }\n');
+    await writeFixture(root, "app/src/main/AndroidManifest.xml", "<manifest />\n");
+    await writeFixture(
+      root,
+      "app/src/main/kotlin/com/example/bootstrap/AppModule.kt",
+      [
+        "package com.example.bootstrap",
+        "",
+        "import org.koin.dsl.*",
+        "",
+        'fun appModule() = module { single { "value" } }',
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const client = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-external-client" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/client/RemoteClient.kt",
+        ),
+    );
+    const di = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-android-role-dependency-injection" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "app/src/main/kotlin/com/example/bootstrap/AppModule.kt",
+        ),
+    );
+
+    expect(client?.ownedFiles[0]?.reason).toContain("retrofit2.*");
+    expect(di?.ownedFiles[0]?.reason).toContain("org.koin.dsl.*");
+  });
+
+  it("maps server-side Kotlin declaration role evidence", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-declaration-role-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/ports/PaymentPort.kt",
+      "package com.example.ports\nfun interface PaymentPort { fun pay() }\n",
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/domain/Job.kt",
+      "package com.example.domain\nclass Job\n",
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/JobFactory.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "import kotlin.time.*",
+        "import org.scheduler.*",
+        "",
+        "class JobFactory : LocalBase(), JobFactoryBase<Job>() {",
+        "  fun buildJob(): Job = TODO()",
+        "  fun local(): LocalBase = TODO()",
+        '  fun label(): String = "job"',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/LocalBase.kt",
+      "package com.example.jobs\nopen class LocalBase\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const extension = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role extension boundary "),
+    );
+    const framework = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role framework component "),
+    );
+
+    expect(extension?.source).toBe("kotlin-server-role-extension-boundary");
+    expect(extension?.confidence).toBe("medium");
+    expect(extension?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/ports/PaymentPort.kt",
+    );
+    expect(
+      extension?.ownedFiles.find(
+        (file) => file.path === "src/main/kotlin/com/example/ports/PaymentPort.kt",
+      )?.reason,
+    ).toContain("interface declaration PaymentPort");
+    expect(framework?.source).toBe("kotlin-server-role-framework-component");
+    expect(framework?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/jobs/JobFactory.kt",
+    );
+    expect(framework?.ownedFiles[0]?.reason).toContain("external type org.scheduler.");
+    expect(framework?.ownedFiles[0]?.reason).not.toContain("org.scheduler.LocalBase");
+    expect(framework?.ownedFiles[0]?.reason).not.toContain("org.scheduler.String");
+  });
+
+  it("does not treat Kotlin stdlib return types as framework components", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-stdlib-type-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/util/Timeouts.kt",
+      [
+        "package com.example.util",
+        "",
+        "import kotlin.time.Duration",
+        "",
+        "fun timeout(): Duration = Duration.ZERO",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/util/Timeouts.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("filters mixed Java/Kotlin module types from Kotlin framework roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-java-local-type-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/java/com/example/framework/BaseHandler.java",
+      "package com.example.framework; public class BaseHandler {}\n",
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/Handler.kt",
+      [
+        "package com.example.api",
+        "",
+        "import com.example.framework.BaseHandler",
+        "",
+        "class Handler : BaseHandler()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/api/Handler.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("maps Kotlin supertypes with constructor arguments", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-supertype-args-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/Handler.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "import org.framework.FrameworkBase",
+        "",
+        "class Handler(callback: () -> Unit) : FrameworkBase(dep = dep, config = config)",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/InjectedHandler.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "import jakarta.inject.Inject",
+        "import org.framework.FrameworkBase",
+        "",
+        "class InjectedHandler @Inject constructor(dep: Any) : FrameworkBase(dep)",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/InternalHandler.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "import org.framework.FrameworkBase",
+        "",
+        "class InternalHandler internal constructor(dep: Any) : FrameworkBase(dep)",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/jobs/QualifiedHandler.kt",
+      [
+        "package com.example.jobs",
+        "",
+        "class QualifiedHandler : org.framework.FrameworkBase()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const framework = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-framework-component" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/jobs/Handler.kt",
+        ),
+    );
+
+    expect(framework?.ownedFiles[0]?.reason).toContain("external type org.framework.FrameworkBase");
+    expect(framework?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/jobs/InjectedHandler.kt",
+    );
+    expect(framework?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/jobs/InternalHandler.kt",
+    );
+    expect(framework?.ownedFiles.map((file) => file.path)).toContain(
+      "src/main/kotlin/com/example/jobs/QualifiedHandler.kt",
+    );
+  });
+
+  it("maps Kotlin Spring components as application services", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-spring-component-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/app/BillingComponent.kt",
+      [
+        "package com.example.app",
+        "",
+        "import org.springframework.stereotype.Component",
+        "",
+        "@Component",
+        "class BillingComponent",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const service = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-application-service" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/app/BillingComponent.kt",
+        ),
+    );
+
+    expect(service?.ownedFiles[0]?.reason).toContain("service annotation @Component");
+  });
+
+  it("does not treat qualified Kotlin annotations as type imports", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-qualified-annotation-type-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/app/Billing.kt",
+      [
+        "package com.example.app",
+        "",
+        "@org.springframework.stereotype.Service",
+        "class Billing : Service",
+        "interface Service",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/app/Billing.kt",
+          ),
+      ),
+    ).toBe(false);
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-application-service" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/app/Billing.kt",
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat project-local nested Kotlin types as external frameworks", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-local-nested-type-map-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/Outer.kt",
+      [
+        "package com.example",
+        "",
+        "class Outer { open class Base }",
+        "class Handler : Outer.Base()",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some((file) => file.path === "src/main/kotlin/com/example/Outer.kt"),
+      ),
+    ).toBe(false);
+  });
+
+
+  it("ignores Kotlin role markers inside nested block comments", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-nested-comment-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/Foo.kt",
+      [
+        "package com.example",
+        "",
+        "/* outer",
+        "  /* inner */",
+        "  import okhttp3.OkHttpClient",
+        "  import org.springframework.web.bind.annotation.RestController",
+        "  @RestController",
+        "*/",
+        "class Foo",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-external-client" ||
+          feature.source === "kotlin-server-role-web-entrypoint",
+      ),
+    ).toBe(false);
   });
 
   it("keeps Kotlin role IDs stable when confidence buckets merge", async () => {
@@ -2955,28 +3983,6 @@ describe("mapFeatures", () => {
             (file) => file.path === "src/main/kotlin/com/example/jobs/JobFactoryProvider.kt",
           ),
       ),
-    ).toBe(false);
-  });
-
-  it("does not infer Android roles from non-Android Gradle module paths", async () => {
-    const root = await fixtureRoot("clawpatch-kotlin-android-path-leak-");
-    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
-    await writeFixture(
-      root,
-      "apps/android/build.gradle.kts",
-      'plugins { id("org.jetbrains.kotlin.jvm") }\n',
-    );
-    await writeFixture(
-      root,
-      "apps/android/src/main/kotlin/com/example/di/Injector.kt",
-      "package com.example.di\nclass Injector\n",
-    );
-
-    const project = await detectProject(root);
-    const result = await mapFeatures(root, project, []);
-
-    expect(
-      result.features.some((feature) => feature.source.startsWith("kotlin-android-role-")),
     ).toBe(false);
   });
 
@@ -4023,58 +5029,6 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
-  it("maps Kotlin role evidence from wildcard imports", async () => {
-    const root = await fixtureRoot("clawpatch-kotlin-wildcard-imports-");
-    await writeFixture(root, "settings.gradle.kts", 'pluginManagement {}\ninclude(":app")\n');
-    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
-    await writeFixture(
-      root,
-      "src/main/kotlin/com/example/client/RemoteClient.kt",
-      [
-        "package com.example.client",
-        "",
-        "import retrofit2.*",
-        "",
-        "class RemoteClient(private val retrofit: Retrofit)",
-        "",
-      ].join("\n"),
-    );
-    await writeFixture(root, "app/build.gradle.kts", 'plugins { id("com.android.application") }\n');
-    await writeFixture(root, "app/src/main/AndroidManifest.xml", "<manifest />\n");
-    await writeFixture(
-      root,
-      "app/src/main/kotlin/com/example/bootstrap/AppModule.kt",
-      [
-        "package com.example.bootstrap",
-        "",
-        "import org.koin.dsl.*",
-        "",
-        'fun appModule() = module { single { "value" } }',
-        "",
-      ].join("\n"),
-    );
-
-    const project = await detectProject(root);
-    const result = await mapFeatures(root, project, []);
-    const client = result.features.find(
-      (feature) =>
-        feature.source === "kotlin-server-role-external-client" &&
-        feature.ownedFiles.some(
-          (file) => file.path === "src/main/kotlin/com/example/client/RemoteClient.kt",
-        ),
-    );
-    const di = result.features.find(
-      (feature) =>
-        feature.source === "kotlin-android-role-dependency-injection" &&
-        feature.ownedFiles.some(
-          (file) => file.path === "app/src/main/kotlin/com/example/bootstrap/AppModule.kt",
-        ),
-    );
-
-    expect(client?.ownedFiles[0]?.reason).toContain("retrofit2.*");
-    expect(di?.ownedFiles[0]?.reason).toContain("org.koin.dsl.*");
-  });
-
   it("maps Kotlin Apache HTTP imports as external clients", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-apache-http-client-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
@@ -4793,56 +5747,6 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
-  it("maps server-side Kotlin declaration role evidence", async () => {
-    const root = await fixtureRoot("clawpatch-kotlin-declaration-role-map-");
-    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
-    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
-    await writeFixture(
-      root,
-      "src/main/kotlin/com/example/ports/PaymentPort.kt",
-      "package com.example.ports\nfun interface PaymentPort { fun pay() }\n",
-    );
-    await writeFixture(
-      root,
-      "src/main/kotlin/com/example/jobs/JobFactory.kt",
-      [
-        "package com.example.jobs",
-        "",
-        "import org.scheduler.*",
-        "",
-        "class JobFactory : JobFactoryBase<Job>() {",
-        "  fun buildJob(): Job = TODO()",
-        "}",
-        "",
-      ].join("\n"),
-    );
-
-    const project = await detectProject(root);
-    const result = await mapFeatures(root, project, []);
-    const extension = result.features.find((feature) =>
-      feature.title.startsWith("Kotlin server role extension boundary "),
-    );
-    const framework = result.features.find((feature) =>
-      feature.title.startsWith("Kotlin server role framework component "),
-    );
-
-    expect(extension?.source).toBe("kotlin-server-role-extension-boundary");
-    expect(extension?.confidence).toBe("medium");
-    expect(extension?.ownedFiles.map((file) => file.path)).toContain(
-      "src/main/kotlin/com/example/ports/PaymentPort.kt",
-    );
-    expect(
-      extension?.ownedFiles.find(
-        (file) => file.path === "src/main/kotlin/com/example/ports/PaymentPort.kt",
-      )?.reason,
-    ).toContain("interface declaration PaymentPort");
-    expect(framework?.source).toBe("kotlin-server-role-framework-component");
-    expect(framework?.ownedFiles.map((file) => file.path)).toContain(
-      "src/main/kotlin/com/example/jobs/JobFactory.kt",
-    );
-    expect(framework?.ownedFiles[0]?.reason).toContain("external type org.scheduler.");
-  });
-
   it("preserves path roles for Kotlin interfaces", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-interface-path-roles-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
@@ -5263,6 +6167,32 @@ describe("mapFeatures", () => {
     );
     await writeFixture(
       root,
+      "src/main/java/com/acme/ext/ServletFilter.java",
+      [
+        "package com.acme.ext;",
+        "",
+        "import jakarta.servlet.Filter;",
+        "",
+        "public class ServletFilter implements Filter {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/java/com/acme/security/SslFactory.java",
+      [
+        "package com.acme.security;",
+        "",
+        "import javax.net.ssl.SSLContext;",
+        "",
+        "public class SslFactory {",
+        "  public SSLContext context() { return null; }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
       "src/main/java/com/acme/local/LocalCommandAdapter.java",
       [
         "package com.acme.local;",
@@ -5315,10 +6245,14 @@ describe("mapFeatures", () => {
         "src/main/java/com/acme/ext/HelperFirstAdapter.java",
         "src/main/java/com/acme/ext/PluginAdapter.java",
         "src/main/java/com/acme/ext/RecordPlugin.java",
+        "src/main/java/com/acme/ext/ServletFilter.java",
         "src/main/java/com/acme/jobs/GenericJobFactory.java",
         "src/main/java/com/acme/jobs/JobFactory.java",
       ].toSorted(),
     );
+    expect(
+      bySource.get("jvm-role-framework-component")?.ownedFiles.map((file) => file.path),
+    ).not.toContain("src/main/java/com/acme/security/SslFactory.java");
     expect(
       bySource
         .get("jvm-role-extension-boundary")
@@ -5328,9 +6262,49 @@ describe("mapFeatures", () => {
       "src/main/java/com/acme/ext/HelperFirstAdapter.java",
       "src/main/java/com/acme/ext/PluginAdapter.java",
       "src/main/java/com/acme/ext/RecordPlugin.java",
+      "src/main/java/com/acme/ext/ServletFilter.java",
       "src/main/java/com/acme/local/LocalCommandAdapter.java",
       "src/main/java/com/google/myapp/GuavaAdapter.java",
     ]);
+  });
+
+  it("does not treat qualified Java annotations as type imports", async () => {
+    const root = await fixtureRoot("clawpatch-java-qualified-annotation-type-map-");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("java") }\n');
+    await writeFixture(
+      root,
+      "src/main/java/com/acme/app/Billing.java",
+      [
+        "package com.acme.app;",
+        "",
+        "@org.springframework.stereotype.Service",
+        "public class Billing implements Service {}",
+        "interface Service {}",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "jvm-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/java/com/acme/app/Billing.java",
+          ),
+      ),
+    ).toBe(false);
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "jvm-role-application-service" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/java/com/acme/app/Billing.java",
+          ),
+      ),
+    ).toBe(true);
   });
 
   it("ignores vendored SwiftPM manifests during detection", async () => {
@@ -5714,6 +6688,1335 @@ let package = Package(name: "HybridApp", targets: [.target(name: "HybridApp")])
         command: "cargo test --manifest-path crates/member/Cargo.toml",
       },
     ]);
+  });
+
+  it("maps CMake C and C++ targets without duplicating main files", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-cpp-map-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      `add_executable(myapp src/main.cpp src/util.cpp)
+add_executable(quoted "src/quoted.cpp")
+ADD_EXECUTABLE(upper src/upper.c)
+add_executable(absin ${root}/src/absin.cpp)
+add_executable(absout /src/main.cpp)
+add_executable(7zip src/seven.c)
+add_executable(latebin)
+target_sources(latebin PRIVATE src/late_main.c src/late_util.c)
+#[[
+add_executable(commented src/commented.c)
+]]
+add_library(core STATIC include/core.hpp src/core.c src/core_util.c)
+add_library(foo.bar STATIC src/dot.c)
+add_library(latelib)
+target_sources(latelib PUBLIC src/late_lib.c include/late_lib.hpp)
+ADD_LIBRARY(upperlib STATIC src/upperlib.c)
+add_library(headers INTERFACE include/headers.hpp)
+add_library(vendored INTERFACE vendor/dep.hpp)
+add_executable(varapp \${APP_SOURCES})
+add_executable(headerapp include/headers.hpp)
+`,
+    );
+    await writeFixture(root, "src/main.cpp", "int main(int argc, char **argv) { return 0; }\n");
+    await writeFixture(root, "src/quoted.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/upper.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/absin.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/seven.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/late_main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/late_util.c", "int late_util(void) { return 0; }\n");
+    await writeFixture(root, "src/commented.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.cpp", "int util() { return 1; }\n");
+    await writeFixture(root, "include/core.hpp", "int core(void);\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+    await writeFixture(root, "src/core_util.c", "int core_util(void) { return 2; }\n");
+    await writeFixture(root, "src/dot.c", "int dot(void) { return 1; }\n");
+    await writeFixture(root, "src/late_lib.c", "int late_lib(void) { return 1; }\n");
+    await writeFixture(root, "include/late_lib.hpp", "int late_lib(void);\n");
+    await writeFixture(root, "src/upperlib.c", "int upperlib(void) { return 1; }\n");
+    await writeFixture(root, "include/headers.hpp", "int header_only(void);\n");
+    await writeFixture(root, "vendor/dep.hpp", "int dep(void);\n");
+    await writeFixture(root, "tests/myapp_test.cpp", "int main() { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const myapp = result.features.find((feature) => feature.title === "CMake binary myapp");
+    const latebin = result.features.find((feature) => feature.title === "CMake binary latebin");
+    const core = result.features.find((feature) => feature.title === "CMake library core");
+    const latelib = result.features.find((feature) => feature.title === "CMake library latelib");
+    const headers = result.features.find((feature) => feature.title === "CMake library headers");
+    const mainFeatures = result.features.filter(
+      (feature) =>
+        feature.kind === "cli-command" && feature.entrypoints[0]?.path === "src/main.cpp",
+    );
+
+    expect(project.detected.languages).toEqual(expect.arrayContaining(["c", "cpp"]));
+    expect(project.detected.packageManagers).toContain("cmake");
+    expect(titles).toContain("CMake binary myapp");
+    expect(titles).toContain("CMake binary quoted");
+    expect(titles).toContain("CMake binary upper");
+    expect(titles).toContain("CMake binary absin");
+    expect(titles).toContain("CMake binary 7zip");
+    expect(titles).toContain("CMake binary latebin");
+    expect(titles).not.toContain("CMake binary absout");
+    expect(titles).not.toContain("CMake binary commented");
+    expect(titles).toContain("CMake library core");
+    expect(titles).toContain("CMake library foo.bar");
+    expect(titles).toContain("CMake library latelib");
+    expect(titles).toContain("CMake library upperlib");
+    expect(titles).toContain("CMake library headers");
+    expect(titles).not.toContain("CMake library vendored");
+    expect(titles).not.toContain("CMake binary varapp");
+    expect(titles).not.toContain("CMake binary headerapp");
+    expect(titles).not.toContain("C++ binary main_test");
+    expect(mainFeatures).toHaveLength(1);
+    expect(myapp?.source).toBe("cmake-bin");
+    expect(myapp?.ownedFiles).toEqual([
+      { path: "src/main.cpp", reason: "target source" },
+      { path: "src/util.cpp", reason: "target source" },
+    ]);
+    expect(myapp?.contextFiles).toEqual([
+      { path: "CMakeLists.txt", reason: "CMake target declaration" },
+      { path: "tests/myapp_test.cpp", reason: "nearby test" },
+    ]);
+    expect(myapp?.tests).toEqual([{ path: "tests/myapp_test.cpp", command: null }]);
+    expect(latebin?.entrypoints[0]?.path).toBe("src/late_main.c");
+    expect(latebin?.ownedFiles).toEqual([
+      { path: "src/late_main.c", reason: "target source" },
+      { path: "src/late_util.c", reason: "target source" },
+    ]);
+    expect(core?.entrypoints[0]?.path).toBe("src/core.c");
+    expect(core?.entrypoints[0]?.symbol).toBeNull();
+    expect(core?.ownedFiles).toEqual([
+      { path: "include/core.hpp", reason: "target source" },
+      { path: "src/core.c", reason: "target source" },
+      { path: "src/core_util.c", reason: "target source" },
+    ]);
+    expect(latelib?.ownedFiles).toEqual([
+      { path: "src/late_lib.c", reason: "target source" },
+      { path: "include/late_lib.hpp", reason: "target source" },
+    ]);
+    expect(headers?.ownedFiles).toEqual([{ path: "include/headers.hpp", reason: "target source" }]);
+  });
+
+  it("does not attach unrelated top-level CMake tests to every target", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-cpp-test-scope-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app src/app.cpp)\nadd_executable(tool src/tool.cpp)\n",
+    );
+    await writeFixture(root, "src/app.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/tool.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "tests/tool_test.cpp", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+    const tool = result.features.find((feature) => feature.title === "CMake binary tool");
+
+    expect(app?.tests).toEqual([]);
+    expect(tool?.tests).toEqual([{ path: "tests/tool_test.cpp", command: null }]);
+  });
+
+  it("does not attach generic main CMake tests to every target", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-generic-main-test-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(foo foo/main.c)\nadd_executable(bar bar/main.c)\n",
+    );
+    await writeFixture(root, "foo/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "bar/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "tests/main_test.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const foo = result.features.find((feature) => feature.title === "CMake binary foo");
+    const bar = result.features.find((feature) => feature.title === "CMake binary bar");
+
+    expect(foo?.tests).toEqual([]);
+    expect(bar?.tests).toEqual([]);
+  });
+
+  it("maps CMake test executables as test suites", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-test-executable-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app src/app.cpp)\nadd_executable(unit_tests src/unit.cpp)\n",
+    );
+    await writeFixture(root, "src/app.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/unit.cpp", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const suite = result.features.find(
+      (feature) => feature.title === "CMake test suite unit_tests",
+    );
+
+    expect(titles).toContain("CMake binary app");
+    expect(titles).not.toContain("CMake binary unit_tests");
+    expect(titles).not.toContain("C++ binary unit");
+    expect(suite).toMatchObject({
+      kind: "test-suite",
+      source: "cmake-test",
+      entrypoints: [{ path: "src/unit.cpp", symbol: null, route: null, command: null }],
+      ownedFiles: [{ path: "src/unit.cpp", reason: "target source" }],
+    });
+  });
+
+  it("keeps CMake binaries with helper source names that look test-like", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-test-like-helper-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app src/main.c src/test_mode.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/test_mode.c", "int helper(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake test suite app");
+    expect(app?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/test_mode.c", reason: "target source" },
+    ]);
+  });
+
+  it("keeps CMake binaries when a test-like helper comes before main", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-test-like-helper-before-main-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app src/test_mode.c src/runner.c)\n",
+    );
+    await writeFixture(root, "src/test_mode.c", "int helper(void) { return 0; }\n");
+    await writeFixture(root, "src/runner.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(titles).not.toContain("CMake test suite app");
+    expect(app?.entrypoints[0]?.path).toBe("src/runner.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/test_mode.c", reason: "target source" },
+      { path: "src/runner.c", reason: "target source" },
+    ]);
+  });
+
+  it("attaches CMake tests named after the target", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-target-named-tests-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app src/main.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "tests/app_test.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(app?.tests).toEqual([{ path: "tests/app_test.c", command: null }]);
+    expect(app?.contextFiles).toContainEqual({ path: "tests/app_test.c", reason: "nearby test" });
+  });
+
+  it("maps semicolon-separated CMake source lists", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-semicolon-sources-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app src/main.c;src/util.c)\nadd_library(core)\ntarget_sources(core PRIVATE src/core.c;include/core.h)\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 1; }\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+    await writeFixture(root, "include/core.h", "int core(void);\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+    const core = result.features.find((feature) => feature.title === "CMake library core");
+
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+    ]);
+    expect(core?.ownedFiles).toEqual([
+      { path: "src/core.c", reason: "target source" },
+      { path: "include/core.h", reason: "target source" },
+    ]);
+  });
+
+  it("ignores CMake helper names ending with built-in commands", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-helper-command-names-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "my_add_executable(app src/main.c)\nmy_add_library(core src/core.c)\nadd_executable(real src/real.c)\nmy_target_sources(real PRIVATE src/helper.c)\nmy_include(cmake/Extra.cmake)\n",
+    );
+    await writeFixture(root, "cmake/Extra.cmake", "add_executable(extra src/extra.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/real.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 0; }\n");
+    await writeFixture(root, "src/helper.c", "int helper(void) { return 0; }\n");
+    await writeFixture(root, "src/extra.c", "int extra(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const real = result.features.find((feature) => feature.title === "CMake binary real");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake binary app");
+    expect(titles).not.toContain("CMake library core");
+    expect(titles).not.toContain("CMake binary extra");
+    expect(real?.ownedFiles).toEqual([{ path: "src/real.c", reason: "target source" }]);
+  });
+
+  it("ignores CMake command text inside strings", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-command-string-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      'message("add_executable(fake src/main.c)")\nmessage([[add_library(fake_lib src/lib.c)]])\nadd_executable(real src/real.c)\n',
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/lib.c", "int lib(void) { return 0; }\n");
+    await writeFixture(root, "src/real.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake binary fake");
+    expect(titles).not.toContain("CMake library fake_lib");
+    expect(titles).toContain("CMake binary real");
+  });
+
+  it("ignores CMake command text inside unquoted command arguments", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-nested-command-text-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "message(STATUS add_executable(fake src/fake.c))\nset(x add_library(fake_lib src/lib.c))\nadd_executable(real src/real.c)\n",
+    );
+    await writeFixture(root, "src/fake.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/lib.c", "int lib(void) { return 0; }\n");
+    await writeFixture(root, "src/real.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake binary fake");
+    expect(titles).not.toContain("CMake library fake_lib");
+    expect(titles).toContain("CMake binary real");
+  });
+
+  it("ignores CMake commands inside uncalled function and macro bodies", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-uncalled-function-body-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "function(make_fake)\nadd_executable(fake src/fake.c)\nendfunction()\nmacro(make_fake_lib)\nadd_library(fake_lib src/lib.c)\nendmacro()\nadd_executable(real src/real.c)\n",
+    );
+    await writeFixture(root, "src/fake.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/lib.c", "int lib(void) { return 0; }\n");
+    await writeFixture(root, "src/real.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake binary fake");
+    expect(titles).not.toContain("CMake library fake_lib");
+    expect(titles).toContain("CMake binary real");
+  });
+
+  it("keeps CMake targets after bracket arguments containing hashes", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-bracket-hash-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "message([[# generated]])\nmessage([=[# also generated]=])\n#[[add_executable(fake src/fake.c)]]\nadd_executable(real src/real.c)\n",
+    );
+    await writeFixture(root, "src/fake.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/real.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).not.toContain("CMake binary fake");
+    expect(titles).toContain("CMake binary real");
+    expect(titles).not.toContain("C binary real");
+  });
+
+  it("maps quoted CMake source paths containing spaces", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-quoted-space-source-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      'add_executable(app "src/main file.cpp" "src/helper file.cpp")\n',
+    );
+    await writeFixture(root, "src/main file.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/helper file.cpp", "int helper(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main file.cpp", reason: "target source" },
+      { path: "src/helper file.cpp", reason: "target source" },
+    ]);
+  });
+
+  it("maps escaped CMake source paths containing spaces and semicolons", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-escaped-source-path-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app src/main\\ file.cpp src/helper\\;part.cpp)\n",
+    );
+    await writeFixture(root, "src/main file.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/helper;part.cpp", "int helper(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main file.cpp", reason: "target source" },
+      { path: "src/helper;part.cpp", reason: "target source" },
+    ]);
+  });
+
+  it("keeps target_sources scoped to standalone CMake projects", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-target-sources-scope-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app)\ntarget_sources(app PRIVATE src/main.c)\n",
+    );
+    await writeFixture(
+      root,
+      "sub/CMakeLists.txt",
+      "add_executable(app)\ntarget_sources(app PRIVATE src/main.c)\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "sub/src/main.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const apps = result.features.filter((feature) => feature.title === "CMake binary app");
+
+    expect(apps.map((feature) => feature.entrypoints[0]?.path).toSorted()).toEqual([
+      "src/main.c",
+      "sub/src/main.c",
+    ]);
+    expect(
+      apps.find((feature) => feature.entrypoints[0]?.path === "src/main.c")?.ownedFiles,
+    ).toEqual([{ path: "src/main.c", reason: "target source" }]);
+    expect(
+      apps.find((feature) => feature.entrypoints[0]?.path === "sub/src/main.c")?.ownedFiles,
+    ).toEqual([{ path: "sub/src/main.c", reason: "target source" }]);
+  });
+
+  it("attaches target_sources from CMake subdirectories", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-subdir-target-sources-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app)\nadd_subdirectory(src)\n");
+    await writeFixture(root, "src/CMakeLists.txt", "target_sources(app PRIVATE main.c util.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(app?.entrypoints[0]).toMatchObject({ path: "src/main.c", command: "app" });
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+    ]);
+    expect(app?.contextFiles).toEqual([
+      { path: "CMakeLists.txt", reason: "CMake target declaration" },
+      { path: "src/CMakeLists.txt", reason: "CMake target source declaration" },
+    ]);
+    expect(titles).not.toContain("C binary main");
+  });
+
+  it("resolves PROJECT_NAME CMake targets", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-project-name-target-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "project(app C)\nadd_executable(${PROJECT_NAME})\ntarget_sources(${PROJECT_NAME} PRIVATE src/main.c src/util.c)\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]).toMatchObject({ path: "src/main.c", command: "app" });
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+    ]);
+  });
+
+  it("resolves PROJECT_NAME inside composed CMake target names", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-composed-project-name-target-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "project(foo C)\nadd_executable(${PROJECT_NAME}_cli src/main.c)\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary foo_cli");
+
+    expect(app?.entrypoints[0]).toMatchObject({ path: "src/main.c", command: "foo_cli" });
+    expect(app?.ownedFiles).toEqual([{ path: "src/main.c", reason: "target source" }]);
+  });
+
+  it("detects header-only C++ CMake libraries as C++ projects", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-header-only-cpp-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_library(headers INTERFACE include/headers.hpp)\n",
+    );
+    await writeFixture(root, "include/headers.hpp", "int header_only(void);\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(project.detected.languages).toContain("cpp");
+    expect(result.features.map((feature) => feature.title)).toContain("CMake library headers");
+  });
+
+  it("maps uppercase C++ source extensions", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-uppercase-cpp-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(uppercpp src/MAIN.CPP src/HELPER.HPP)\n",
+    );
+    await writeFixture(root, "src/MAIN.CPP", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/HELPER.HPP", "int helper(void);\n");
+    await writeFixture(root, "src/tool.C", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const uppercpp = result.features.find((feature) => feature.title === "CMake binary uppercpp");
+    const tool = result.features.find((feature) => feature.title === "C++ binary tool");
+
+    expect(project.detected.languages).toContain("cpp");
+    expect(uppercpp?.entrypoints[0]).toMatchObject({ path: "src/MAIN.CPP", symbol: "main" });
+    expect(uppercpp?.tags).toContain("cpp");
+    expect(uppercpp?.ownedFiles).toEqual([
+      { path: "src/MAIN.CPP", reason: "target source" },
+      { path: "src/HELPER.HPP", reason: "target source" },
+    ]);
+    expect(tool?.entrypoints[0]).toMatchObject({ path: "src/tool.C", symbol: "main" });
+    expect(tool?.tags).toContain("cpp");
+  });
+
+  it("preserves CMake targets that share the same source list", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-shared-sources-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_library(core_static STATIC src/core.c)\nadd_library(core_shared SHARED src/core.c)\n",
+    );
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const coreStatic = result.features.find(
+      (feature) => feature.title === "CMake library core_static",
+    );
+    const coreShared = result.features.find(
+      (feature) => feature.title === "CMake library core_shared",
+    );
+
+    expect(titles).toContain("CMake library core_static");
+    expect(titles).toContain("CMake library core_shared");
+    expect(coreStatic?.entrypoints[0]?.symbol).toBe("core_static");
+    expect(coreShared?.entrypoints[0]?.symbol).toBe("core_shared");
+  });
+
+  it("prefers exact target-name source stems before prefix matches", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-target-stem-entry-");
+    await writeFixture(root, "CMakeLists.txt", "add_library(app src/apple.c src/app.c)\n");
+    await writeFixture(root, "src/apple.c", "int apple(void) { return 1; }\n");
+    await writeFixture(root, "src/app.c", "int app(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake library app");
+
+    expect(app?.entrypoints[0]?.path).toBe("src/app.c");
+  });
+
+  it("keeps existing CMake library ids when a target starts sharing sources", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-shared-source-stability-");
+    await writeFixture(root, "CMakeLists.txt", "add_library(core_static STATIC src/core.c)\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const first = await mapFeatures(root, project, []);
+    const firstCore = first.features.find(
+      (feature) => feature.title === "CMake library core_static",
+    );
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_library(core_shared SHARED src/core.c)\nadd_library(core_static STATIC src/core.c)\n",
+    );
+    const second = await mapFeatures(root, project, first.features);
+    const secondCore = second.features.find(
+      (feature) => feature.title === "CMake library core_static",
+    );
+    const shared = second.features.find((feature) => feature.title === "CMake library core_shared");
+
+    expect(secondCore?.featureId).toBe(firstCore?.featureId);
+    expect(secondCore?.entrypoints[0]?.symbol).toBeNull();
+    expect(shared?.entrypoints[0]?.symbol).toBe("core_shared");
+    expect(second.stale).toBe(0);
+  });
+
+  it("keeps disambiguated CMake library ids when source sharing stops", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-shared-source-removal-");
+    await writeFixture(root, "CMakeLists.txt", "add_library(core_static STATIC src/core.c)\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const first = await mapFeatures(root, project, []);
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_library(core_static STATIC src/core.c)\nadd_library(core_shared SHARED src/core.c)\n",
+    );
+    const second = await mapFeatures(root, project, first.features);
+    const sharedDuringCollision = second.features.find(
+      (feature) => feature.title === "CMake library core_shared",
+    );
+    await writeFixture(root, "CMakeLists.txt", "add_library(core_shared SHARED src/core.c)\n");
+    const third = await mapFeatures(root, project, second.features);
+    const sharedAfterRemoval = third.features.find(
+      (feature) => feature.title === "CMake library core_shared",
+    );
+
+    expect(sharedAfterRemoval?.featureId).toBe(sharedDuringCollision?.featureId);
+    expect(sharedAfterRemoval?.entrypoints[0]?.symbol).toBe("core_shared");
+    expect(third.stale).toBe(1);
+  });
+
+  it("keeps initially disambiguated CMake library ids after source sharing stops", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-initial-shared-source-removal-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_library(core_static STATIC src/core.c)\nadd_library(core_shared SHARED src/core.c)\n",
+    );
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const first = await mapFeatures(root, project, []);
+    const sharedDuringCollision = first.features.find(
+      (feature) => feature.title === "CMake library core_shared",
+    );
+    await writeFixture(root, "CMakeLists.txt", "add_library(core_shared SHARED src/core.c)\n");
+    const second = await mapFeatures(root, project, first.features);
+    const sharedAfterRemoval = second.features.find(
+      (feature) => feature.title === "CMake library core_shared",
+    );
+
+    expect(sharedAfterRemoval?.featureId).toBe(sharedDuringCollision?.featureId);
+    expect(sharedAfterRemoval?.entrypoints[0]?.symbol).toBe("core_shared");
+    expect(second.stale).toBe(1);
+  });
+
+  it("does not map CMake target sources outside the project root", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-cpp-safe-sources-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(tool ../outside.c src/main.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const tool = result.features.find((feature) => feature.title === "CMake binary tool");
+
+    expect(tool?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(tool?.ownedFiles).toEqual([{ path: "src/main.c", reason: "target source" }]);
+    expect(
+      result.features.flatMap((feature) => [
+        ...feature.entrypoints.map((entrypoint) => entrypoint.path),
+        ...feature.ownedFiles.map((file) => file.path),
+      ]),
+    ).not.toContain("../outside.c");
+  });
+
+  it("uses the CMake source that defines main as the executable entrypoint", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-cpp-main-entry-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app src/app.cpp src/main.cpp)\n");
+    await writeFixture(root, "src/app.cpp", "struct App { int main(void) { return 0; } };\n");
+    await writeFixture(root, "src/main.cpp", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+    const mainFeatures = result.features.filter(
+      (feature) =>
+        feature.kind === "cli-command" && feature.entrypoints[0]?.path === "src/main.cpp",
+    );
+
+    expect(app?.entrypoints[0]?.path).toBe("src/main.cpp");
+    expect(mainFeatures).toHaveLength(1);
+    expect(result.features.map((feature) => feature.title)).not.toContain("C++ binary main");
+  });
+
+  it("does not map member main methods as standalone C++ binaries", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-member-main-");
+    await writeFixture(root, "src/app.cpp", "struct App { int main(void) { return 0; } };\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).not.toContain("C++ binary app");
+  });
+
+  it("resolves targets from included CMake modules relative to the source dir", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-include-source-dir-");
+    await writeFixture(root, "CMakeLists.txt", "include(cmake/Targets.cmake)\n");
+    await writeFixture(root, "cmake/Targets.cmake", "add_executable(app src/main.c src/util.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+    ]);
+  });
+
+  it("resolves built-in CMake dir variables in includes and sources", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-built-in-dir-vars-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Targets.cmake)\n",
+    );
+    await writeFixture(
+      root,
+      "cmake/Targets.cmake",
+      "include(${CMAKE_CURRENT_LIST_DIR}/More.cmake)\nadd_executable(app ${CMAKE_SOURCE_DIR}/src/main.c ${PROJECT_SOURCE_DIR}/src/project.c ${CMAKE_CURRENT_SOURCE_DIR}/src/util.c ${CMAKE_CURRENT_LIST_DIR}/local.c)\n",
+    );
+    await writeFixture(
+      root,
+      "cmake/More.cmake",
+      "target_sources(app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/extra.c)\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/project.c", "int project(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 0; }\n");
+    await writeFixture(root, "cmake/local.c", "int local(void) { return 0; }\n");
+    await writeFixture(root, "cmake/extra.c", "int extra(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/project.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+      { path: "cmake/local.c", reason: "target source" },
+      { path: "cmake/extra.c", reason: "target source" },
+    ]);
+  });
+
+  it("resolves CMake source dir variables from nested project roots", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-nested-project-vars-");
+    await writeFixture(
+      root,
+      "sub/CMakeLists.txt",
+      "add_executable(project_app ${PROJECT_SOURCE_DIR}/src/project.c)\nadd_executable(source_app ${CMAKE_SOURCE_DIR}/src/source.c)\n",
+    );
+    await writeFixture(root, "src/project.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/source.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "sub/src/project.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "sub/src/source.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const projectApp = result.features.find(
+      (feature) => feature.title === "CMake binary project_app",
+    );
+    const sourceApp = result.features.find(
+      (feature) => feature.title === "CMake binary source_app",
+    );
+
+    expect(projectApp?.entrypoints[0]?.path).toBe("sub/src/project.c");
+    expect(sourceApp?.entrypoints[0]?.path).toBe("sub/src/source.c");
+  });
+
+  it("resets PROJECT_SOURCE_DIR when nested CMakeLists declares project", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-nested-project-source-dir-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "cmake_minimum_required(VERSION 3.20)\nproject(Root C)\nadd_subdirectory(sub)\n",
+    );
+    await writeFixture(
+      root,
+      "sub/CMakeLists.txt",
+      "project(Sub C)\nadd_executable(project_app ${PROJECT_SOURCE_DIR}/src/project.c)\nadd_executable(source_app ${CMAKE_SOURCE_DIR}/src/source.c)\n",
+    );
+    await writeFixture(root, "src/project.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/source.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "sub/src/project.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "sub/src/source.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const projectApp = result.features.find(
+      (feature) => feature.title === "CMake binary project_app",
+    );
+    const sourceApp = result.features.find(
+      (feature) =>
+        feature.title === "CMake binary source_app" &&
+        feature.entrypoints[0]?.path === "src/source.c",
+    );
+    const sourceAppPaths = result.features
+      .filter((feature) => feature.title === "CMake binary source_app")
+      .map((feature) => feature.entrypoints[0]?.path);
+
+    expect(projectApp?.entrypoints[0]?.path).toBe("sub/src/project.c");
+    expect(sourceApp?.entrypoints[0]?.path).toBe("src/source.c");
+    expect(sourceAppPaths).toEqual(["src/source.c"]);
+  });
+
+  it("resolves nested CMake includes relative to the source dir", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-nested-include-source-dir-");
+    await writeFixture(root, "CMakeLists.txt", "include(cmake/A.cmake)\n");
+    await writeFixture(root, "cmake/A.cmake", "include(cmake/B.cmake)\n");
+    await writeFixture(root, "cmake/B.cmake", "add_executable(app src/main.c src/util.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/util.c", "int util(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]?.path).toBe("src/main.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "src/util.c", reason: "target source" },
+    ]);
+  });
+
+  it("resolves repeated CMake includes relative to each source dir", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-repeated-include-source-dir-");
+    await writeFixture(
+      root,
+      "CMakeLists.txt",
+      "add_executable(app)\nadd_subdirectory(a)\nadd_subdirectory(b)\n",
+    );
+    await writeFixture(root, "a/CMakeLists.txt", "include(../cmake/Part.cmake)\n");
+    await writeFixture(root, "b/CMakeLists.txt", "include(../cmake/Part.cmake)\n");
+    await writeFixture(root, "cmake/Part.cmake", "target_sources(app PRIVATE local.c)\n");
+    await writeFixture(root, "a/local.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "b/local.c", "int helper(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "CMake binary app");
+
+    expect(app?.entrypoints[0]?.path).toBe("a/local.c");
+    expect(app?.ownedFiles).toEqual([
+      { path: "a/local.c", reason: "target source" },
+      { path: "b/local.c", reason: "target source" },
+    ]);
+  });
+
+  it("ignores unreferenced CMake modules", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-unreferenced-module-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app src/main.c)\n");
+    await writeFixture(root, "cmake/Dead.cmake", "add_executable(dead src/dead.c)\n");
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/dead.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).toContain("CMake binary app");
+    expect(titles).not.toContain("CMake binary dead");
+  });
+
+  it("maps autotools C and C++ binary and library targets", async () => {
+    const root = await fixtureRoot("clawpatch-autotools-cpp-map-");
+    await writeFixture(
+      root,
+      "Makefile.am",
+      "bin_PROGRAMS = thing my-tool defaulted header-tool # installed helpers\nbin_PROGRAMS += appended\nthing_SOURCES = thing.c \\\n  util.c\nmy_tool_SOURCES = main.c tool-util.c\nappended_SOURCES = appended.c\nappended_SOURCES += appended_util.c\nheader_tool_SOURCES = include/header.hpp\nlib_LTLIBRARIES = libcore.la libcore-extra.la\nlib_LTLIBRARIES += libmore.la\nlibcore_la_SOURCES = core.cc core_util.cc\nlibcore_extra_la_SOURCES = extra.cc\nlibmore_la_SOURCES = more.c\nlibmore_la_SOURCES += more_util.c\n",
+    );
+    await writeFixture(root, "thing.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "util.c", "int util(void) { return 1; }\n");
+    await writeFixture(root, "main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "tool-util.c", "int tool_util(void) { return 1; }\n");
+    await writeFixture(root, "appended.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "appended_util.c", "int appended_util(void) { return 1; }\n");
+    await writeFixture(root, "defaulted.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "cppdefault.cpp", "int main() { return 0; }\n");
+    await writeFixture(root, "include/header.hpp", "int header(void);\n");
+    await writeFixture(root, "core.cc", "int core() { return 1; }\n");
+    await writeFixture(root, "core_util.cc", "int coreUtil() { return 2; }\n");
+    await writeFixture(root, "extra.cc", "int extra() { return 3; }\n");
+    await writeFixture(root, "more.c", "int more(void) { return 3; }\n");
+    await writeFixture(root, "more_util.c", "int more_util(void) { return 4; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const thing = result.features.find((feature) => feature.title === "Autotools binary thing");
+    const myTool = result.features.find((feature) => feature.title === "Autotools binary my-tool");
+    const appended = result.features.find(
+      (feature) => feature.title === "Autotools binary appended",
+    );
+    const defaulted = result.features.find(
+      (feature) => feature.title === "Autotools binary defaulted",
+    );
+    const core = result.features.find((feature) => feature.title === "Autotools library libcore");
+    const extra = result.features.find(
+      (feature) => feature.title === "Autotools library libcore-extra",
+    );
+    const more = result.features.find((feature) => feature.title === "Autotools library libmore");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(project.detected.packageManagers).toContain("autotools");
+    expect(titles).not.toContain("Autotools binary installed");
+    expect(titles).not.toContain("Autotools binary helpers");
+    expect(titles).not.toContain("Autotools binary header-tool");
+    expect(titles).not.toContain("Autotools binary cppdefault");
+    expect(titles).toContain("C++ binary cppdefault");
+    expect(thing?.entrypoints[0]).toMatchObject({
+      path: "thing.c",
+      symbol: "main",
+      command: "thing",
+    });
+    expect(myTool?.entrypoints[0]).toMatchObject({
+      path: "main.c",
+      symbol: "main",
+      command: "my-tool",
+    });
+    expect(myTool?.ownedFiles).toEqual([
+      { path: "main.c", reason: "target source" },
+      { path: "tool-util.c", reason: "target source" },
+    ]);
+    expect(appended?.ownedFiles).toEqual([
+      { path: "appended.c", reason: "target source" },
+      { path: "appended_util.c", reason: "target source" },
+    ]);
+    expect(defaulted?.entrypoints[0]).toMatchObject({
+      path: "defaulted.c",
+      symbol: "main",
+      command: "defaulted",
+    });
+    expect(titles).not.toContain("C binary defaulted");
+    expect(thing?.ownedFiles).toEqual([
+      { path: "thing.c", reason: "target source" },
+      { path: "util.c", reason: "target source" },
+    ]);
+    expect(core?.entrypoints[0]?.path).toBe("core.cc");
+    expect(core?.ownedFiles).toEqual([
+      { path: "core.cc", reason: "target source" },
+      { path: "core_util.cc", reason: "target source" },
+    ]);
+    expect(extra?.ownedFiles).toEqual([{ path: "extra.cc", reason: "target source" }]);
+    expect(more?.ownedFiles).toEqual([
+      { path: "more.c", reason: "target source" },
+      { path: "more_util.c", reason: "target source" },
+    ]);
+  });
+
+  it("maps autotools targets from Makefile.in", async () => {
+    const root = await fixtureRoot("clawpatch-autotools-makefile-in-");
+    await writeFixture(
+      root,
+      "Makefile.in",
+      "bin_PROGRAMS = app$(EXEEXT)\napp_SOURCES = main.c util.c\nlib_LTLIBRARIES = libcore.la\nlibcore_la_SOURCES = core.c\n",
+    );
+    await writeFixture(root, "main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "util.c", "int util(void) { return 1; }\n");
+    await writeFixture(root, "core.c", "int core(void) { return 1; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "Autotools binary app");
+    const core = result.features.find((feature) => feature.title === "Autotools library libcore");
+
+    expect(project.detected.packageManagers).toContain("autotools");
+    expect(app?.ownedFiles).toEqual([
+      { path: "main.c", reason: "target source" },
+      { path: "util.c", reason: "target source" },
+    ]);
+    expect(core?.ownedFiles).toEqual([{ path: "core.c", reason: "target source" }]);
+  });
+
+  it("maps autotools sources with source-directory variables", async () => {
+    const root = await fixtureRoot("clawpatch-autotools-srcdir-sources-");
+    await writeFixture(
+      root,
+      "src/Makefile.am",
+      "bin_PROGRAMS = app\napp_SOURCES = $(srcdir)/main.c $(top_srcdir)/shared/util.c\nlib_LTLIBRARIES = libcore.la\nlibcore_la_SOURCES = ${srcdir}/core.c @top_srcdir@/include/core.h\n",
+    );
+    await writeFixture(root, "src/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/core.c", "int core(void) { return 1; }\n");
+    await writeFixture(root, "shared/util.c", "int util(void) { return 1; }\n");
+    await writeFixture(root, "include/core.h", "int core(void);\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "Autotools binary app");
+    const core = result.features.find((feature) => feature.title === "Autotools library libcore");
+
+    expect(app?.entrypoints[0]).toMatchObject({ path: "src/main.c", command: "app" });
+    expect(app?.ownedFiles).toEqual([
+      { path: "src/main.c", reason: "target source" },
+      { path: "shared/util.c", reason: "target source" },
+    ]);
+    expect(core?.ownedFiles).toEqual([
+      { path: "src/core.c", reason: "target source" },
+      { path: "include/core.h", reason: "target source" },
+    ]);
+  });
+
+  it("honors Automake assignment overrides", async () => {
+    const root = await fixtureRoot("clawpatch-autotools-override-");
+    await writeFixture(
+      root,
+      "Makefile.am",
+      "bin_PROGRAMS = old cleared\nbin_PROGRAMS = new\nold_SOURCES = old.c\nnew_SOURCES = stale.c\nnew_SOURCES = new.c\ncleared_SOURCES = cleared.c\ncleared_SOURCES =\n",
+    );
+    await writeFixture(root, "old.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "new.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "stale.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "cleared.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+    const target = result.features.find((feature) => feature.title === "Autotools binary new");
+
+    expect(titles).toContain("Autotools binary new");
+    expect(titles).not.toContain("Autotools binary old");
+    expect(titles).not.toContain("Autotools binary cleared");
+    expect(target?.ownedFiles).toEqual([{ path: "new.c", reason: "target source" }]);
+  });
+
+  it("keeps same-named CMake and Autotools targets", async () => {
+    const root = await fixtureRoot("clawpatch-cmake-autotools-same-target-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(app main.c cmake_only.c)\n");
+    await writeFixture(
+      root,
+      "Makefile.am",
+      "bin_PROGRAMS = app\napp_SOURCES = main.c auto_only.c\n",
+    );
+    await writeFixture(root, "main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "cmake_only.c", "int cmake_only(void) { return 0; }\n");
+    await writeFixture(root, "auto_only.c", "int auto_only(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const cmake = result.features.find((feature) => feature.title === "CMake binary app");
+    const autotools = result.features.find((feature) => feature.title === "Autotools binary app");
+
+    expect(cmake?.ownedFiles).toEqual([
+      { path: "main.c", reason: "target source" },
+      { path: "cmake_only.c", reason: "target source" },
+    ]);
+    expect(autotools?.ownedFiles).toEqual([
+      { path: "main.c", reason: "target source" },
+      { path: "auto_only.c", reason: "target source" },
+    ]);
+  });
+
+  it("maps standalone C main files without php-src extension semantics", async () => {
+    const root = await fixtureRoot("clawpatch-c-main-map-");
+    await writeFixture(root, "src/tool.c", "int main(void) { return 0; }\n");
+    await writeFixture(
+      root,
+      "ext/iconv/config.m4",
+      "PHP_NEW_EXTENSION(iconv, iconv.c, $ext_shared)\n",
+    );
+    await writeFixture(root, "ext/iconv/iconv.c", "int iconv_helper(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const tool = result.features.find((feature) => feature.title === "C binary tool");
+
+    expect(project.detected.languages).toContain("c");
+    expect(tool?.entrypoints[0]).toMatchObject({
+      path: "src/tool.c",
+      symbol: "main",
+      command: "tool",
+    });
+    expect(result.features.some((feature) => feature.source === "php-ext")).toBe(false);
+    expect(
+      result.features.some((feature) => feature.entrypoints[0]?.path === "ext/iconv/config.m4"),
+    ).toBe(false);
+  });
+
+  it("skips C and C++ sample project paths", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-sample-paths-");
+    await writeFixture(root, "CMakeLists.txt", "add_executable(sample fixtures/example/main.c)\n");
+    await writeFixture(root, "fixtures/example/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "testdata/CMakeLists.txt", "add_executable(sample main.c)\n");
+    await writeFixture(root, "testdata/main.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some((feature) =>
+        ["c-main", "cmake-bin", "cmake-lib", "autotools-bin", "autotools-lib"].includes(
+          feature.source,
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      result.features.some((feature) => feature.entrypoints[0]?.path.includes("fixtures/")),
+    ).toBe(false);
+  });
+
+  it("does not attach JavaScript tests to C and C++ entries", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-js-test-");
+    await writeFixture(root, "package.json", JSON.stringify({ scripts: { test: "vitest" } }));
+    await writeFixture(root, "src/app.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/app.test.ts", "test('app', () => {});\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "C++ binary app");
+
+    expect(app?.tests).toEqual([]);
+    expect(app?.contextFiles).toEqual([]);
+  });
+
+  it("attaches plural-suffixed C and C++ tests without mapping them as binaries", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-plural-tests-");
+    await writeFixture(root, "src/app.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/app_tests.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/FooTests.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/Contest.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "src/latest.cpp", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "C++ binary app");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(app?.tests).toEqual([{ path: "src/app_tests.cpp", command: null }]);
+    expect(titles).not.toContain("C++ binary app_tests");
+    expect(titles).not.toContain("C++ binary FooTests");
+    expect(titles).toContain("C++ binary Contest");
+    expect(titles).toContain("C++ binary latest");
+  });
+
+  it("attaches capitalized C and C++ test directories without mapping them as binaries", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-capitalized-tests-");
+    await writeFixture(root, "src/parser.cpp", "int main(void) { return 0; }\n");
+    await writeFixture(root, "Tests/parser.cpp", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const parser = result.features.find((feature) => feature.title === "C++ binary parser");
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(parser?.tests).toEqual([{ path: "Tests/parser.cpp", command: null }]);
+    expect(titles.filter((title) => title === "C++ binary parser")).toHaveLength(1);
+  });
+
+  it("detects C and C++ main functions after literals containing braces", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-literal-braces-");
+    await writeFixture(
+      root,
+      "src/app.cpp",
+      'const char *json = "{\\"ok\\": true}";\nconst char *raw = R"tag({raw})tag";\nint main(void) { return 0; }\n',
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).toContain("C++ binary app");
+  });
+
+  it("detects C and C++ main functions after literals containing comment markers", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-literal-comments-");
+    await writeFixture(
+      root,
+      "src/app.cpp",
+      'const char *url = R"json({"url":"http://example.com"})json";\nconst char *open = "/*";\nint main(void) { return 0; }\nconst char *close = "*/";\n',
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).toContain("C++ binary app");
+  });
+
+  it("ignores C and C++ block markers inside line comments", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-line-comment-block-marker-");
+    await writeFixture(
+      root,
+      "src/app.cpp",
+      "// /* disabled guard\nint main(void) { return 0; }\n// */\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).toContain("C++ binary app");
+  });
+
+  it("detects C and C++ main functions after comments containing quotes", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-comment-quotes-");
+    await writeFixture(
+      root,
+      "src/app.cpp",
+      '// TODO parse "flag\n/* disabled "quoted" branch */\nint main(void) { return 0; }\n',
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).toContain("C++ binary app");
+  });
+
+  it("ignores comment-only C and C++ sources", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-comment-only-");
+    await writeFixture(root, "src/placeholder.cpp", `// ${"x".repeat(200)}\n`);
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(result.features.map((feature) => feature.title)).not.toContain("C++ binary placeholder");
+  });
+
+  it("does not attach dependency C and C++ tests from skipped paths", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-skipped-nearby-tests-");
+    await writeFixture(root, "app.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "vendor/app_test.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "CMakeFiles/app_test.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "cmake-build-debug/app_test.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "fixtures/app_test.c", "int main(void) { return 0; }\n");
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const app = result.features.find((feature) => feature.title === "C binary app");
+
+    expect(app?.tests).toEqual([]);
+    expect(app?.contextFiles).toEqual([]);
+  });
+
+  it("skips dependency trees during C and C++ discovery", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-dependency-paths-");
+    await writeFixture(root, "src/app.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, "vendor/tool/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(root, ".venv/native/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(
+      root,
+      "CMakeFiles/CompilerIdCXX/CMakeCXXCompilerId.cpp",
+      "int main(void) { return 0; }\n",
+    );
+    await writeFixture(
+      root,
+      "cmake-build-debug/generated/tool.cpp",
+      "int main(void) { return 0; }\n",
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const paths = result.features.flatMap((feature) =>
+      feature.entrypoints.map((entrypoint) => entrypoint.path),
+    );
+
+    expect(paths).toContain("src/app.c");
+    expect(paths.some((path) => path.startsWith("vendor/"))).toBe(false);
+    expect(paths.some((path) => path.startsWith(".venv/"))).toBe(false);
+    expect(paths.some((path) => path.startsWith("CMakeFiles/"))).toBe(false);
+    expect(paths.some((path) => path.startsWith("cmake-build-debug/"))).toBe(false);
+  });
+
+  it("ignores dependency and generated C and C++ files during detection", async () => {
+    const root = await fixtureRoot("clawpatch-cpp-dependency-detect-");
+    await writeFixture(root, "vendor/CMakeLists.txt", "add_executable(vendor main.c)\n");
+    await writeFixture(root, "vendor/main.c", "int main(void) { return 0; }\n");
+    await writeFixture(
+      root,
+      "CMakeFiles/CompilerIdCXX/CMakeCXXCompilerId.cpp",
+      "int main(void) { return 0; }\n",
+    );
+    await writeFixture(
+      root,
+      "cmake-build-debug/_deps/foo-src/CMakeLists.txt",
+      "add_executable(foo main.cpp)\n",
+    );
+    await writeFixture(
+      root,
+      "cmake-build-debug/_deps/foo-src/main.cpp",
+      "int main(void) { return 0; }\n",
+    );
+
+    const project = await detectProject(root);
+
+    expect(project.detected.languages).not.toContain("c");
+    expect(project.detected.languages).not.toContain("cpp");
+    expect(project.detected.packageManagers).not.toContain("cmake");
+  });
+
+  it("detects non-C and C++ languages under vendor path components", async () => {
+    const root = await fixtureRoot("clawpatch-vendor-language-detect-");
+    await writeFixture(root, "src/vendor/worker.py", "def main():\n    pass\n");
+    await writeFixture(root, "src/pkg/vendor/app.py", "def main():\n    pass\n");
+    await writeFixture(root, "src/main/vendor/App.java", "class App {}\n");
+
+    const project = await detectProject(root);
+
+    expect(project.detected.languages).toEqual(expect.arrayContaining(["python", "java"]));
+  });
+
+  it("ignores top-level vendored native project metadata during detection", async () => {
+    const root = await fixtureRoot("clawpatch-top-vendor-native-detect-");
+    await writeFixture(root, "package.json", JSON.stringify({ name: "host" }, null, 2));
+    await writeFixture(
+      root,
+      "vendor/Dependency/Package.swift",
+      'import PackageDescription\nlet package = Package(name: "Dependency")\n',
+    );
+    await writeFixture(root, "vendor/Dependency/build.gradle.kts", 'plugins { id("java") }\n');
+
+    const project = await detectProject(root);
+
+    expect(project.detected.languages).not.toContain("swift");
+    expect(project.detected.packageManagers).not.toContain("swiftpm");
+    expect(project.detected.packageManagers).not.toContain("gradle");
   });
 
   it("maps Python project metadata, console scripts, source groups, and tests", async () => {

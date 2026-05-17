@@ -9,6 +9,7 @@ import { nowIso, writeJson } from "./fs.js";
 import { changedFilesSince, discoverGit, findProjectRoot } from "./git.js";
 import { stableId, runId } from "./id.js";
 import { mapFeatures } from "./mapper.js";
+import { suppressedTestCommandTag } from "./mappers/types.js";
 import { providerByName } from "./provider.js";
 import { buildFixPrompt, buildReviewPrompt, buildRevalidatePrompt } from "./prompt.js";
 import {
@@ -777,16 +778,29 @@ function mergeFinding(existing: FindingRecord | null, incoming: FindingRecord): 
   };
 }
 
-export async function doctorCommand(context: AppContext): Promise<unknown> {
+export async function doctorCommand(
+  context: AppContext,
+  flags: Record<string, string | boolean> = {},
+): Promise<unknown> {
   const loaded = await loadProjectState(context).catch(() => null);
   const root = loaded?.root ?? context.root;
-  const providerName = loaded?.config.provider.name ?? "codex";
+  const providerName =
+    stringFlag(flags, "provider") ??
+    process.env["CLAWPATCH_PROVIDER"] ??
+    loaded?.config.provider.name ??
+    "codex";
+  const model =
+    stringFlag(flags, "model") ??
+    process.env["CLAWPATCH_MODEL"] ??
+    loaded?.config.provider.model ??
+    null;
   const provider = providerByName(providerName);
   const providerVersion = await provider.check(root);
   return {
     root,
     state: loaded === null ? "missing" : "ok",
     provider: providerName,
+    model,
     providerVersion,
     secrets: "redacted",
   };
@@ -851,12 +865,14 @@ function validationCommandsForFeature(
   const featureCommands = (feature?.tests ?? []).flatMap((test) =>
     test.command === null || test.command.length === 0 ? [] : [test.command],
   );
+  const configuredTest =
+    feature?.tags.includes(suppressedTestCommandTag) === true ? null : commands.test;
   const ordered = [
     commands.format,
     ...featureCommands,
     commands.typecheck,
     commands.lint,
-    commands.test,
+    configuredTest,
   ].filter((command): command is string => command !== null && command.length > 0);
   return Array.from(new Set(ordered));
 }
