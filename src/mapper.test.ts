@@ -3876,6 +3876,67 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
+  it("keeps Kotlin code after comment markers inside strings", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-string-comment-marker-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/Foo.kt",
+      [
+        "package com.example.api",
+        "",
+        'const val marker = "/*"',
+        "",
+        "@org.springframework.web.bind.annotation.RestController",
+        "class Foo",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-web-entrypoint" &&
+          feature.ownedFiles.some((file) => file.path === "src/main/kotlin/com/example/api/Foo.kt"),
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores Kotlin role markers inside raw strings", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-raw-string-marker-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/Foo.kt",
+      [
+        "package com.example",
+        "",
+        'val template = """',
+        "import okhttp3.OkHttpClient",
+        "@org.springframework.web.bind.annotation.RestController",
+        '"""',
+        "class Foo",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-external-client" ||
+          feature.source === "kotlin-server-role-web-entrypoint",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps Kotlin role IDs stable when confidence buckets merge", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-role-bucket-stability-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");

@@ -1703,9 +1703,12 @@ function stripKotlinComments(source: string): string {
   let stripped = "";
   let index = 0;
   let depth = 0;
+  let stringMode: "char" | "double" | "raw" | null = null;
   while (index < source.length) {
+    const char = source[index] ?? "";
     const pair = source.slice(index, index + 2);
-    if (pair === "/*") {
+    const triple = source.slice(index, index + 3);
+    if (stringMode === null && pair === "/*") {
       depth += 1;
       stripped += "  ";
       index += 2;
@@ -1717,15 +1720,66 @@ function stripKotlinComments(source: string): string {
         stripped += "  ";
         index += 2;
       } else {
+        stripped += char === "\n" ? "\n" : " ";
+        index += 1;
+      }
+      continue;
+    }
+
+    if (stringMode === "raw") {
+      if (triple === '"""') {
+        stringMode = null;
+        stripped += "   ";
+        index += 3;
+      } else {
+        stripped += char === "\n" ? "\n" : " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (stringMode !== null) {
+      stripped += char === "\n" ? "\n" : " ";
+      if (char === "\\") {
+        stripped += source[index + 1] === "\n" ? "\n" : " ";
+        index += 2;
+        continue;
+      }
+      if ((stringMode === "double" && char === '"') || (stringMode === "char" && char === "'")) {
+        stringMode = null;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (triple === '"""') {
+      stringMode = "raw";
+      stripped += "   ";
+      index += 3;
+      continue;
+    }
+    if (char === '"') {
+      stringMode = "double";
+      stripped += " ";
+      index += 1;
+      continue;
+    }
+    if (char === "'") {
+      stringMode = "char";
+      stripped += " ";
+      index += 1;
+      continue;
+    }
+    if (pair === "//") {
+      while (index < source.length && source[index] !== "\n") {
         stripped += " ";
         index += 1;
       }
       continue;
     }
-    stripped += source[index];
+    stripped += char;
     index += 1;
   }
-  return stripped.replace(/\/\/.*$/gmu, "");
+  return stripped;
 }
 
 function dedupeEvidence(evidence: JvmRoleEvidence[]): JvmRoleEvidence[] {
