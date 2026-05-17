@@ -3979,6 +3979,38 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
+  it("resolves explicit Kotlin imports that shadow default built-in names", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-explicit-builtin-shadow-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/Controller.kt",
+      [
+        "package com.example.api",
+        "",
+        "import com.external.Result",
+        "",
+        "class Controller {",
+        "  fun result(): Result = TODO()",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const framework = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-framework-component" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/api/Controller.kt",
+        ),
+    );
+
+    expect(framework?.ownedFiles[0]?.reason).toContain("returns external type com.external.Result");
+  });
+
   it("does not resolve local Kotlin declarations through wildcard imports", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-local-wildcard-type-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");

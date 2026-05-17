@@ -936,7 +936,7 @@ function kotlinImportForType(
   if (rootType === undefined || rootType.length === 0) {
     return undefined;
   }
-  if (isKotlinStdlibImport(type) || isKotlinBuiltinType(rootType)) {
+  if (isKotlinStdlibImport(type)) {
     return undefined;
   }
   if (isNestedType && /^[a-z]/u.test(rootType)) {
@@ -952,6 +952,9 @@ function kotlinImportForType(
   const direct = info.imports.get(type);
   if (direct !== undefined) {
     return isKotlinStdlibImport(direct) ? undefined : direct;
+  }
+  if (isKotlinBuiltinType(rootType)) {
+    return undefined;
   }
   const packageName = info.packageName ?? "";
   if (
