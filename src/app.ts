@@ -1,4 +1,4 @@
-import { appendFile, lstat, readFile, writeFile } from "node:fs/promises";
+import { appendFile, lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { hostname } from "node:os";
 import {
@@ -1069,7 +1069,7 @@ export async function openPrCommand(
   const linkedFindings = findings.filter((finding) => patch.findingIds.includes(finding.findingId));
   const title = prTitle(stringFlag(flags, "title"), linkedFindings, patch);
   const body = renderPatchPrBody(patch, linkedFindings);
-  const gitFiles = gitRelativePatchFiles(git.root, loaded.root, patch.filesChanged);
+  const gitFiles = await gitRelativePatchFiles(git.root, loaded.root, patch.filesChanged);
   const draft = flags["draft"] === true;
   const dryRunStagePlan =
     flags["dryRun"] === true && patch.git.commitSha === null
@@ -1474,8 +1474,19 @@ function renderPatchPrBody(patch: PatchAttempt, findings: FindingRecord[]): stri
   return `${lines.join("\n")}\n`;
 }
 
-function gitRelativePatchFiles(gitRoot: string, projectRoot: string, files: string[]): string[] {
-  const projectPrefix = gitRelativePathPrefix(gitRoot, projectRoot);
+async function gitRelativePatchFiles(
+  gitRoot: string,
+  projectRoot: string,
+  files: string[],
+): Promise<string[]> {
+  const projectPrefix = await gitRelativePathPrefix(gitRoot, projectRoot);
+  if (projectPrefix === ".." || projectPrefix.startsWith("../")) {
+    throw new ClawpatchError(
+      `project root is outside git repository: ${projectRoot}`,
+      2,
+      "invalid-root",
+    );
+  }
   const scopedPrefix = isUsableRelativePrefix(projectPrefix) ? projectPrefix : "";
   return files.map((file) => {
     const relativeFile = normalizePath(file);
@@ -1561,7 +1572,7 @@ async function assertPatchWorktree(
   );
   const statusChanges = gitStatusChanges(status.stdout);
   const dirty = uniqueStrings(statusChanges.flatMap((change) => change.paths));
-  const statePrefix = gitRelativePathPrefix(gitRoot, stateDir);
+  const statePrefix = await gitRelativePathPrefix(gitRoot, stateDir);
   const sourceDirty = dirty.filter((file) => !isStatePath(file, statePrefix));
   if (sourceDirty.length === 0) {
     throw new ClawpatchError("no uncommitted patch changes to commit", 2, "invalid-input");
@@ -1649,13 +1660,21 @@ function isStatePath(file: string, statePrefix: string): boolean {
   return statePrefix.length > 0 && (file === statePrefix || file.startsWith(`${statePrefix}/`));
 }
 
-function gitRelativePathPrefix(gitRoot: string, path: string): string {
+async function gitRelativePathPrefix(gitRoot: string, path: string): Promise<string> {
   const direct = normalizePath(relative(gitRoot, path));
   if (isUsableRelativePrefix(direct)) {
     return direct;
   }
-  const normalizedGitRoot = normalizeDarwinPrivateVar(gitRoot);
-  const normalizedPath = normalizeDarwinPrivateVar(path);
+  const [realGitRoot, realPath] = await Promise.all([
+    realpath(gitRoot).catch(() => gitRoot),
+    realpath(path).catch(() => path),
+  ]);
+  const resolved = normalizePath(relative(realGitRoot, realPath));
+  if (resolved === "" || isUsableRelativePrefix(resolved)) {
+    return resolved;
+  }
+  const normalizedGitRoot = normalizeDarwinPrivateVar(realGitRoot);
+  const normalizedPath = normalizeDarwinPrivateVar(realPath);
   if (normalizedPath === normalizedGitRoot) {
     return "";
   }

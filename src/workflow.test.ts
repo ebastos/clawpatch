@@ -3430,6 +3430,94 @@ describe("workflow", () => {
     });
   });
 
+  it("opens PRs from symlinked project roots with repo-relative patch paths", async () => {
+    const root = await fixtureRoot("clawpatch-open-pr-symlink-root-");
+    const projectRoot = join(root, "packages/app");
+    await writeFixture(
+      root,
+      "packages/app/package.json",
+      JSON.stringify({ name: "open-pr-symlink-root" }),
+    );
+    await writeFixture(root, "packages/app/src/index.ts", "export const value = 'TODO_BUG';\n");
+    await initGit(root);
+    await checkCommand(root, "git add packages");
+    await checkCommand(root, 'git -c commit.gpgsign=false commit -q -m "base"');
+    const origin = await fixtureRoot("clawpatch-open-pr-symlink-root-origin-");
+    await checkCommand(root, `git init --bare -q ${origin}`);
+    await checkCommand(root, `git remote add origin ${origin}`);
+    const linkParent = await fixtureRoot("clawpatch-open-pr-symlink-root-link-");
+    const linkedProjectRoot = join(linkParent, "app");
+    await symlink(projectRoot, linkedProjectRoot);
+    const context = await makeContext(testOptions(linkedProjectRoot));
+    const paths = statePaths(join(linkedProjectRoot, ".clawpatch"));
+    await initCommand(context, {});
+    await writeFixture(root, "packages/app/src/index.ts", "export const value = 'fixed';\n");
+    const now = new Date().toISOString();
+    await writePatchAttempt(paths, {
+      schemaVersion: 1,
+      patchAttemptId: "pat_open_pr_symlink_root",
+      findingIds: [],
+      featureIds: [],
+      status: "applied",
+      plan: "Replace the marker value.",
+      filesChanged: ["src/index.ts"],
+      commandsRun: [],
+      testResults: [
+        {
+          command: "pnpm test",
+          cwd: linkedProjectRoot,
+          exitCode: 0,
+          durationMs: 1,
+          stdout: "",
+          stderr: "",
+        },
+      ],
+      provider: null,
+      git: {
+        baseSha: (await runCommand("git rev-parse HEAD", root)).stdout.trim(),
+        commitSha: null,
+        branchName: null,
+        prUrl: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const ghScripts = await fixtureRoot("clawpatch-open-pr-symlink-root-gh-");
+    const successGh = join(ghScripts, "success-gh.sh");
+    await writeFixture(
+      ghScripts,
+      "success-gh.sh",
+      "#!/bin/sh\necho https://github.com/openclaw/clawpatch/pull/1004\n",
+    );
+    await chmod(successGh, 0o755);
+    const previousGh = process.env["CLAWPATCH_GH"];
+    try {
+      process.env["CLAWPATCH_GH"] = successGh;
+      const preview = (await openPrCommand(context, {
+        patch: "pat_open_pr_symlink_root",
+        base: "main",
+        branch: "clawpatch/pat_open_pr_symlink_root",
+        dryRun: true,
+      })) as { commands: string[] };
+      const opened = (await openPrCommand(context, {
+        patch: "pat_open_pr_symlink_root",
+        base: "main",
+        branch: "clawpatch/pat_open_pr_symlink_root",
+      })) as { commit: string; pr: string };
+      const committed = await runCommand(`git show --name-only --format= ${opened.commit}`, root);
+
+      expect(preview.commands).toContain("git add -- ':(literal)packages/app/src/index.ts'");
+      expect(opened.pr).toBe("https://github.com/openclaw/clawpatch/pull/1004");
+      expect(committed.stdout.trim()).toBe("packages/app/src/index.ts");
+    } finally {
+      if (previousGh === undefined) {
+        delete process.env["CLAWPATCH_GH"];
+      } else {
+        process.env["CLAWPATCH_GH"] = previousGh;
+      }
+    }
+  });
+
   it("opens PRs for newly created dangling symlinks", async () => {
     const root = await fixtureRoot("clawpatch-open-pr-symlink-");
     await writeFixture(root, "package.json", JSON.stringify({ name: "open-pr-symlink" }));
