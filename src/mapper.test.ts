@@ -6332,6 +6332,86 @@ describe("mapFeatures", () => {
     ).toBe(false);
   });
 
+  it("does not treat Android apply syntax inside Gradle raw strings as Android modules", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-raw-string-apply-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "build.gradle.kts",
+      [
+        'plugins { id("org.jetbrains.kotlin.jvm") }',
+        'val sample = """',
+        "apply plugin: 'com.android.library'",
+        '"""',
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/OrderController.kt",
+      [
+        "package com.example.api",
+        "",
+        "import org.springframework.web.bind.annotation.RestController",
+        "",
+        "@RestController",
+        "class OrderController",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const web = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role web entrypoint "),
+    );
+
+    expect(web?.source).toBe("kotlin-server-role-web-entrypoint");
+    expect(
+      result.features.some((feature) => feature.source.startsWith("kotlin-android-role-")),
+    ).toBe(false);
+  });
+
+  it("does not treat Android extension blocks inside Gradle raw strings as Android modules", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-android-raw-string-extension-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(
+      root,
+      "build.gradle.kts",
+      [
+        'plugins { id("org.jetbrains.kotlin.jvm") }',
+        'val sample = """',
+        "android { namespace = 'com.example' }",
+        '"""',
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/OrderController.kt",
+      [
+        "package com.example.api",
+        "",
+        "import org.springframework.web.bind.annotation.RestController",
+        "",
+        "@RestController",
+        "class OrderController",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const web = result.features.find((feature) =>
+      feature.title.startsWith("Kotlin server role web entrypoint "),
+    );
+
+    expect(web?.source).toBe("kotlin-server-role-web-entrypoint");
+    expect(
+      result.features.some((feature) => feature.source.startsWith("kotlin-android-role-")),
+    ).toBe(false);
+  });
+
   it("does not treat apply-false Android plugin declarations with GString versions as Android modules", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-android-gstring-apply-false-");
     await writeFixture(root, "settings.gradle", "pluginManagement {}\n");
@@ -7117,6 +7197,68 @@ describe("mapFeatures", () => {
     );
   });
 
+  it("maps Kotlin supertypes before generic where constraints", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-where-supertype-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/ApiRoute.kt",
+      [
+        "package com.example.api",
+        "",
+        "import io.ktor.server.routing.Route",
+        "",
+        "class ApiRoute<T> : Route",
+        "  where T : Any",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const component = result.features.find(
+      (feature) =>
+        feature.source === "kotlin-server-role-framework-component" &&
+        feature.ownedFiles.some(
+          (file) => file.path === "src/main/kotlin/com/example/api/ApiRoute.kt",
+        ),
+    );
+
+    expect(component?.ownedFiles[0]?.reason).toContain(
+      "inherits external type io.ktor.server.routing.Route",
+    );
+  });
+
+  it("does not strip where package segments from Kotlin supertypes", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-where-package-supertype-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/where/Route.kt",
+      ["package com.where", "", "open class Route", ""].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/api/ApiRoute.kt",
+      ["package com.example.api", "", "class ApiRoute : com.where.Route()", ""].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/api/ApiRoute.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
   it("maps bodyless Kotlin supertypes before top-level functions", async () => {
     const root = await fixtureRoot("clawpatch-kotlin-bodyless-supertype-");
     await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
@@ -7483,6 +7625,42 @@ describe("mapFeatures", () => {
         "package com.example.factory",
         "",
         "import com.example.routes.routes",
+        "",
+        "class Factory { fun handler(): routes.Handler = TODO() }",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+
+    expect(
+      result.features.some(
+        (feature) =>
+          feature.source === "kotlin-server-role-framework-component" &&
+          feature.ownedFiles.some(
+            (file) => file.path === "src/main/kotlin/com/example/factory/Factory.kt",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not resolve wildcard-imported local lowercase dotted Kotlin return types as framework roles", async () => {
+    const root = await fixtureRoot("clawpatch-kotlin-wildcard-local-lowercase-dotted-type-");
+    await writeFixture(root, "settings.gradle.kts", "pluginManagement {}\n");
+    await writeFixture(root, "build.gradle.kts", 'plugins { id("org.jetbrains.kotlin.jvm") }\n');
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/routes/Routes.kt",
+      ["package com.example.routes", "", "object routes { class Handler }", ""].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/main/kotlin/com/example/factory/Factory.kt",
+      [
+        "package com.example.factory",
+        "",
+        "import com.example.routes.*",
         "",
         "class Factory { fun handler(): routes.Handler = TODO() }",
         "",
