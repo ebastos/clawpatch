@@ -1981,6 +1981,18 @@ describe("mapFeatures", () => {
     await writeFixture(root, "src/hono.test.ts", "test('hono', () => {});\n");
     await writeFixture(
       root,
+      "src/bom-router.ts",
+      [
+        "\uFEFFimport { Router as BomRouter } from 'express';",
+        "",
+        "const bomRouter = BomRouter();",
+        "bomRouter.get('/bom-router', listBomRouter);",
+        "function listBomRouter() {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
       "src/mixed.tsx",
       [
         "import express from 'express';",
@@ -2069,6 +2081,7 @@ describe("mapFeatures", () => {
         "Express route DELETE /users",
         "Express route GET /reports",
         "Express route GET /projects/:projectId/items",
+        "Express route GET /bom-router",
         "Express route GET /after-jsx-close",
         "Express route GET /custom-file-real",
         "Fastify route GET /status",

@@ -560,7 +560,7 @@ function isImportDeclarationStart(source: string, importIndex: number): boolean 
   let cursor = importIndex - 1;
   while (cursor >= 0) {
     const char = source[cursor];
-    if (char === " " || char === "\t" || char === "\r") {
+    if (char === " " || char === "\t" || char === "\r" || char === "\uFEFF") {
       cursor -= 1;
       continue;
     }
