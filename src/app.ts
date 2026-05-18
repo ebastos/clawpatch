@@ -1124,18 +1124,30 @@ export async function openPrCommand(
     if (stagePlan.addFiles.length > 0) {
       await checkedRun(
         "git add",
-        runCommandArgs("git", ["add", "--", ...stagePlan.addFiles], git.root),
+        runCommandArgs(
+          "git",
+          ["add", "--", ...stagePlan.addFiles.map(gitPathspec)],
+          git.root,
+        ),
       );
     }
     if (stagePlan.updateFiles.length > 0) {
       await checkedRun(
         "git add -u",
-        runCommandArgs("git", ["add", "-u", "--", ...stagePlan.updateFiles], git.root),
+        runCommandArgs(
+          "git",
+          ["add", "-u", "--", ...stagePlan.updateFiles.map(gitPathspec)],
+          git.root,
+        ),
       );
     }
     await checkedRun(
       "git commit",
-      runCommandArgs("git", ["commit", "-m", title, "--", ...stagePlan.commitFiles], git.root),
+      runCommandArgs(
+        "git",
+        ["commit", "-m", title, "--", ...stagePlan.commitFiles.map(gitPathspec)],
+        git.root,
+      ),
     );
     const commit = await checkedRun(
       "git rev-parse",
@@ -1497,12 +1509,12 @@ function plannedPrCommands(
     const updateFiles = stagePlan?.updateFiles ?? [];
     commands.push(branchExists ? `git switch ${shellArg(branch)}` : `git switch -c ${shellArg(branch)}`);
     if (addFiles.length > 0) {
-      commands.push(`git add -- ${addFiles.map(shellArg).join(" ")}`);
+      commands.push(`git add -- ${shellPathspecArgs(addFiles)}`);
     }
     if (updateFiles.length > 0) {
-      commands.push(`git add -u -- ${updateFiles.map(shellArg).join(" ")}`);
+      commands.push(`git add -u -- ${shellPathspecArgs(updateFiles)}`);
     }
-    commands.push(`git commit -m ${shellArg(title)} -- ${commitFiles.map(shellArg).join(" ")}`);
+    commands.push(`git commit -m ${shellArg(title)} -- ${shellPathspecArgs(commitFiles)}`);
   }
   commands.push(`git push -u origin ${shellArg(branch)}`);
   commands.push(`gh ${prCreateArgs(base, branch, title, draft).map(shellArg).join(" ")}`);
@@ -1684,6 +1696,14 @@ async function localBranchExists(gitRoot: string, branch: string): Promise<boole
 
 function firstUrl(output: string): string | null {
   return /https?:\/\/\S+/u.exec(output)?.[0] ?? null;
+}
+
+function gitPathspec(path: string): string {
+  return `:(literal)${path}`;
+}
+
+function shellPathspecArgs(files: string[]): string {
+  return files.map((file) => shellArg(gitPathspec(file))).join(" ");
 }
 
 function shellArg(value: string): string {

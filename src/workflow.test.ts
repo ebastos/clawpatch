@@ -3421,7 +3421,7 @@ describe("workflow", () => {
 
     expect(preview).toMatchObject({
       commands: expect.arrayContaining([
-        expect.stringContaining("git add -- packages/app/src/index.ts"),
+        expect.stringContaining("git add -- ':(literal)packages/app/src/index.ts'"),
         expect.stringContaining(
           "gh pr create --base develop --head clawpatch/pat_open_pr_subdir",
         ),
@@ -3823,6 +3823,92 @@ describe("workflow", () => {
     }
   });
 
+  it("opens PRs for literal names that look like git pathspec magic", async () => {
+    const root = await fixtureRoot("clawpatch-open-pr-literal-pathspec-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ name: "open-pr-literal-pathspec" }),
+    );
+    await writeFixture(root, "README.md", "base\n");
+    await initGit(root);
+    await checkCommand(root, "git add package.json README.md");
+    await checkCommand(root, 'git -c commit.gpgsign=false commit -q -m "base"');
+    const origin = await fixtureRoot("clawpatch-open-pr-literal-pathspec-origin-");
+    await checkCommand(root, `git init --bare -q ${origin}`);
+    await checkCommand(root, `git remote add origin ${origin}`);
+    const context = await makeContext(testOptions(root));
+    const paths = statePaths(join(root, ".clawpatch"));
+    await initCommand(context, {});
+    await writeFixture(root, ":(top)README.md", "literal\n");
+    const now = new Date().toISOString();
+    await writePatchAttempt(paths, {
+      schemaVersion: 1,
+      patchAttemptId: "pat_open_pr_literal_pathspec",
+      findingIds: [],
+      featureIds: [],
+      status: "applied",
+      plan: "Add the reviewed literal pathspec-looking file.",
+      filesChanged: [":(top)README.md"],
+      commandsRun: [],
+      testResults: [
+        {
+          command: "pnpm test",
+          cwd: root,
+          exitCode: 0,
+          durationMs: 1,
+          stdout: "",
+          stderr: "",
+        },
+      ],
+      provider: null,
+      git: {
+        baseSha: (await runCommand("git rev-parse HEAD", root)).stdout.trim(),
+        commitSha: null,
+        branchName: null,
+        prUrl: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const ghScripts = await fixtureRoot("clawpatch-open-pr-literal-pathspec-gh-");
+    const successGh = join(ghScripts, "success-gh.sh");
+    await writeFixture(
+      ghScripts,
+      "success-gh.sh",
+      "#!/bin/sh\necho https://github.com/openclaw/clawpatch/pull/1002\n",
+    );
+    await chmod(successGh, 0o755);
+    const previousGh = process.env["CLAWPATCH_GH"];
+    try {
+      process.env["CLAWPATCH_GH"] = successGh;
+      const preview = (await openPrCommand(context, {
+        patch: "pat_open_pr_literal_pathspec",
+        base: "main",
+        branch: "clawpatch/pat_open_pr_literal_pathspec",
+        dryRun: true,
+      })) as { commands: string[] };
+      const opened = (await openPrCommand(context, {
+        patch: "pat_open_pr_literal_pathspec",
+        base: "main",
+        branch: "clawpatch/pat_open_pr_literal_pathspec",
+      })) as { commit: string; pr: string };
+      const committed = await runCommand(`git show --name-status --format= ${opened.commit}`, root);
+      const readme = await readFile(join(root, "README.md"), "utf8");
+
+      expect(preview.commands).toContain("git add -- ':(literal):(top)README.md'");
+      expect(opened.pr).toBe("https://github.com/openclaw/clawpatch/pull/1002");
+      expect(committed.stdout.trim()).toBe("A\t:(top)README.md");
+      expect(readme).toBe("base\n");
+    } finally {
+      if (previousGh === undefined) {
+        delete process.env["CLAWPATCH_GH"];
+      } else {
+        process.env["CLAWPATCH_GH"] = previousGh;
+      }
+    }
+  });
+
   it("opens PRs for staged renames when patch records only the destination", async () => {
     const root = await fixtureRoot("clawpatch-open-pr-rename-");
     await writeFixture(root, "package.json", JSON.stringify({ name: "open-pr-rename" }));
@@ -3891,7 +3977,7 @@ describe("workflow", () => {
       })) as { commit: string; pr: string };
       const committed = await runCommand(`git show --name-status --format= ${opened.commit}`, root);
 
-      expect(preview.commands).toContain("git add -- docs/new.md");
+      expect(preview.commands).toContain("git add -- ':(literal)docs/new.md'");
       expect(preview.commands).toEqual(
         expect.arrayContaining([
           expect.stringMatching(/git commit .*docs\/new\.md.*docs\/old\.md/u),
@@ -3957,7 +4043,7 @@ describe("workflow", () => {
       dryRun: true,
     })) as { commands: string[] };
 
-    expect(preview.commands).toContain("git add -u -- docs/old.md");
+    expect(preview.commands).toContain("git add -u -- ':(literal)docs/old.md'");
     expect(preview.commands).toEqual(
       expect.arrayContaining([expect.stringMatching(/git commit .*docs\/old\.md/u)]),
     );
