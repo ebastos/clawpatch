@@ -517,6 +517,7 @@ describe("workflow", () => {
       const summary = await readFile(summaryPath, "utf8");
 
       expect(result).toMatchObject({
+        reviewed: 0,
         findings: 0,
         reportFindings: 1,
       });
@@ -3721,6 +3722,16 @@ describe("workflow", () => {
       );
       expect(afterFailure?.git.commitSha).toMatch(/^[a-f0-9]{40}$/u);
       expect(afterFailure?.git.branchName).toBe("clawpatch/pat_open_pr_retry");
+      const recordedCommit = afterFailure?.git.commitSha;
+      if (recordedCommit === null || recordedCommit === undefined) {
+        throw new Error("missing recorded patch commit");
+      }
+
+      await writeFixture(root, "src/unrelated.ts", "export const unrelated = true;\n");
+      await checkCommand(root, "git add src/unrelated.ts");
+      await checkCommand(root, 'git -c commit.gpgsign=false commit -q -m "unrelated"');
+      const advancedHead = (await runCommand("git rev-parse HEAD", root)).stdout.trim();
+      expect(advancedHead).not.toBe(recordedCommit);
 
       process.env["CLAWPATCH_GH"] = successGh;
       await expect(
@@ -3731,6 +3742,12 @@ describe("workflow", () => {
       ).resolves.toMatchObject({
         pr: "https://github.com/openclaw/clawpatch/pull/999",
       });
+      const remoteHead = (
+        await runCommand("git ls-remote --heads origin clawpatch/pat_open_pr_retry", root)
+      ).stdout
+        .trim()
+        .split(/\s+/u)[0];
+      expect(remoteHead).toBe(recordedCommit);
     } finally {
       if (previousGh === undefined) {
         delete process.env["CLAWPATCH_GH"];

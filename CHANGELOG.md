@@ -7,6 +7,8 @@
 - Added review prompt provenance and budget accounting for included files, omitted files, prompt bytes, and approximate tokens.
 - Hardened review ingestion so provider findings must cite included files with valid line ranges and matching evidence quotes.
 - Fixed `clawpatch open-pr` so repositories without default-branch metadata use a dedicated patch branch and let GitHub choose the PR base.
+- Fixed `clawpatch open-pr` retries to push the recorded patch commit instead of any later local branch tip.
+- Fixed `clawpatch ci --since` empty-review output so it reports `reviewed: 0`.
 - Fixed Express route mapping for aliased Router imports that follow block comment banners, thanks @rohitjavvadi.
 - Fixed Bun package-manager detection to recognize the text `bun.lock` lockfile, thanks @austinm911.
 

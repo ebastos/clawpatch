@@ -257,7 +257,7 @@ export async function ciCommand(
   return {
     initialized,
     mapped: numberField(mapped, "features"),
-    reviewed: numberField(reviewed, "reviewed"),
+    reviewed: numberField(reviewed, "reviewed") ?? 0,
     findings: reviewFindings,
     reportFindings: report.findings ?? 0,
     report: report.output ?? null,
@@ -1117,6 +1117,7 @@ export async function openPrCommand(
     force,
   );
   let commitSha = patch.git.commitSha;
+  const hadRecordedCommit = commitSha !== null;
   if (commitSha === null) {
     if (git.currentBranch !== branch) {
       const switchArgs = (await localBranchExists(git.root, branch))
@@ -1160,7 +1161,11 @@ export async function openPrCommand(
       prUrl: patch.git.prUrl,
     });
   }
-  await checkedRun("git push", runCommandArgs("git", ["push", "-u", "origin", branch], git.root));
+  commitSha = assertDefined(commitSha, "missing patch commit");
+  const pushArgs = hadRecordedCommit
+    ? ["push", "origin", `${commitSha}:refs/heads/${branch}`]
+    : ["push", "-u", "origin", branch];
+  await checkedRun("git push", runCommandArgs("git", pushArgs, git.root));
   const ghArgs = prCreateArgs(base, branch, title, draft);
   const gh = await checkedRun("gh pr create", runCommandArgs(githubCli(), ghArgs, git.root, body));
   const prUrl = firstUrl(gh.stdout) ?? gh.stdout.trim();
@@ -1537,7 +1542,11 @@ function plannedPrCommands(
     }
     commands.push(`git commit -m ${shellArg(title)} -- ${shellPathspecArgs(commitFiles)}`);
   }
-  commands.push(`git push -u origin ${shellArg(branch)}`);
+  commands.push(
+    patch.git.commitSha === null
+      ? `git push -u origin ${shellArg(branch)}`
+      : `git push origin ${shellArg(`${patch.git.commitSha}:refs/heads/${branch}`)}`,
+  );
   commands.push(`gh ${prCreateArgs(base, branch, title, draft).map(shellArg).join(" ")}`);
   return commands;
 }
