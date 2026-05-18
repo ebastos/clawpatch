@@ -1912,12 +1912,75 @@ describe("mapFeatures", () => {
       root,
       "src/fastify-plugin.ts",
       [
+        "import fastifyPlugin from 'fastify-plugin';",
         "import { FastifyInstance } from 'fastify';",
         "",
         "export async function routes(fastify: FastifyInstance) {",
         "  fastify.get('/plugin-users', listPluginUsers);",
         "}",
+        "export async function appRoutes(app: FastifyInstance) {",
+        "  app.get('/plugin-app-users', listPluginAppUsers);",
+        "}",
+        "const app = createHttpServer();",
+        "app.get('/not-plugin-app-typed', ignoredApp);",
+        "export const serverRoutes = fastifyPlugin(async function routes(server) {",
+        "  server.get('/plugin-server-users', listPluginServerUsers);",
+        "});",
+        "export const arrowRoutes = fastifyPlugin(async (app) => {",
+        "  app.get('/plugin-arrow-users', listPluginArrowUsers);",
+        "});",
+        "export const typedArrowRoutes = async (server: FastifyInstance): Promise<void> => {",
+        "  server.get('/plugin-typed-arrow-users', listPluginTypedArrowUsers);",
+        "};",
+        "const server = createHttpServer();",
+        "server.get('/not-plugin-server', ignoredServer);",
+        'export async function inlineRoutes(inlineApp: import("fastify").FastifyInstance) {',
+        '  inlineApp.get("/plugin-inline-users", listPluginInlineUsers);',
+        "}",
+        'export const inlineArrowRoutes = async (inlineServer: import("fastify").FastifyInstance): Promise<void> => {',
+        '  inlineServer.get("/plugin-inline-arrow-users", listPluginInlineArrowUsers);',
+        "};",
         "function listPluginUsers() {}",
+        "function listPluginAppUsers() {}",
+        "function listPluginServerUsers() {}",
+        "function listPluginArrowUsers() {}",
+        "function listPluginTypedArrowUsers() {}",
+        "function listPluginInlineUsers() {}",
+        "function listPluginInlineArrowUsers() {}",
+        "function createHttpServer() { return { get() {} }; }",
+        "function ignoredApp() {}",
+        "function ignoredServer() {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/fastify-multiline-import.ts",
+      [
+        "import {",
+        "  FastifyInstance,",
+        "} from 'fastify';",
+        "",
+        "export async function multilineRoutes(app: FastifyInstance) {",
+        "  app.get('/plugin-multiline-users', listPluginMultilineUsers);",
+        "}",
+        "function listPluginMultilineUsers() {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/not-fastify-plugin.ts",
+      [
+        'import { FastifyInstance } from "./types"',
+        'import Fastify from "fastify"',
+        "export async function genericAppRoutes(app) {",
+        '  app.get("/not-plugin-app", ignored);',
+        "}",
+        "export async function shadowInstanceRoutes(instance: FastifyInstance) {",
+        '  instance.get("/shadow-fastify-instance", ignored);',
+        "}",
+        "function ignored() {}",
         "",
       ].join("\n"),
     );
@@ -2089,6 +2152,13 @@ describe("mapFeatures", () => {
         "Fastify route GET /route-status",
         "Fastify route POST /webhook/github",
         "Fastify route GET /plugin-users",
+        "Fastify route GET /plugin-app-users",
+        "Fastify route GET /plugin-server-users",
+        "Fastify route GET /plugin-arrow-users",
+        "Fastify route GET /plugin-typed-arrow-users",
+        "Fastify route GET /plugin-inline-users",
+        "Fastify route GET /plugin-inline-arrow-users",
+        "Fastify route GET /plugin-multiline-users",
         "Hono route GET /api/items",
         "Hono route DELETE /sessions/:id",
       ]),
@@ -2111,6 +2181,10 @@ describe("mapFeatures", () => {
     expect(titles).not.toContain("Express route GET /assigned-not-router");
     expect(titles).not.toContain("Express route GET /dynamic/");
     expect(titles).not.toContain("Fastify route GET /dynamic/");
+    expect(titles).not.toContain("Fastify route GET /not-plugin-app");
+    expect(titles).not.toContain("Fastify route GET /not-plugin-app-typed");
+    expect(titles).not.toContain("Fastify route GET /not-plugin-server");
+    expect(titles).not.toContain("Fastify route GET /shadow-fastify-instance");
     expect(titles).not.toContain("Fastify route GET /concat-");
     expect(titles).not.toContain("Express route DELETE /reports");
     expect(admin?.source).toBe("express-route");
