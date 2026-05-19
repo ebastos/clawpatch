@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ClawpatchError } from "./errors.js";
 import { __testing, extractJson, providerByName } from "./provider.js";
 import { safeProviderPreview } from "./provider-json.js";
+import { agentMapJsonSchema, reviewJsonSchema } from "./provider-schema.js";
 import { revalidateOutputSchema, reviewOutputSchema } from "./types.js";
 
 // eslint-disable-next-line no-underscore-dangle
@@ -14,6 +15,7 @@ const {
   cursorAgentArgs,
   cursorEnv,
   cursorFailureMessage,
+  cursorPrompt,
   cursorTimeoutMs,
   extractAcpxJson,
   extractCursorJson,
@@ -440,6 +442,20 @@ describe("Cursor provider", () => {
     delete process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
 
     expect(cursorTimeoutMs()).toBe(300_000);
+  });
+
+  it("adds Cursor-specific strict evidence guidance for reviews", () => {
+    const prompt = cursorPrompt("base review prompt", reviewJsonSchema, true);
+
+    expect(prompt).toContain("Cursor evidence rules:");
+    expect(prompt).toContain('Prefer "quote": null');
+    expect(prompt).toContain("evidence.path must exactly match an included file path");
+  });
+
+  it("does not add review evidence guidance to Cursor map prompts", () => {
+    const prompt = cursorPrompt("base map prompt", agentMapJsonSchema, true);
+
+    expect(prompt).not.toContain("Cursor evidence rules:");
   });
 
   it("parses semver for Cursor advisory checks", () => {

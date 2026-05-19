@@ -332,7 +332,18 @@ function cursorPrompt(prompt: string, schema: object, readOnly: boolean): string
       "The Cursor CLI also receives --mode ask for this read-only request.\n\n" +
       prompt
     : prompt;
-  return `${promptBody}
+  const evidenceRules =
+    schema === reviewJsonSchema
+      ? `
+
+Cursor evidence rules:
+- Cite only files that are explicitly included in the prompt's file blocks.
+- evidence.path must exactly match an included file path.
+- If you provide startLine and endLine, copy them from the included file block and keep them inside that file's shown line range.
+- Prefer "quote": null. Include a quote only when you copied it exactly from the included file contents.
+- If you are unsure about an evidence quote or line range, set quote, startLine, and endLine to null instead of guessing.`
+      : "";
+  return `${promptBody}${evidenceRules}
 
 Provider output schema:
 ${JSON.stringify(schema, null, 2)}
@@ -1378,6 +1389,7 @@ export const __testing = {
   cursorAgentArgs,
   cursorEnv,
   cursorFailureMessage,
+  cursorPrompt,
   cursorTimeoutMs,
   extractCursorJson,
   extractAcpxJson,
