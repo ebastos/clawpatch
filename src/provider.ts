@@ -144,24 +144,28 @@ const acpxProvider: Provider = {
     return `${version} (tested against ${ACPX_TESTED_VERSIONS})`;
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, agentMapJsonSchema, "read");
-    return agentMapOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, agentMapJsonSchema, "read", (output) =>
+      agentMapOutputSchema.parse(output),
+    );
   },
   async review(root: string, prompt: string, options: ProviderOptions): Promise<ReviewOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, reviewJsonSchema, "read");
-    return reviewOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, reviewJsonSchema, "read", (output) =>
+      reviewOutputSchema.parse(output),
+    );
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, fixPlanJsonSchema, "approve");
-    return fixPlanOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, fixPlanJsonSchema, "approve", (output) =>
+      fixPlanOutputSchema.parse(output),
+    );
   },
   async revalidate(
     root: string,
     prompt: string,
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, revalidateJsonSchema, "read");
-    return revalidateOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, revalidateJsonSchema, "read", (output) =>
+      revalidateOutputSchema.parse(output),
+    );
   },
 };
 
@@ -754,13 +758,14 @@ function buildAcpxJsonArgs(
   return args;
 }
 
-async function runAcpxJson(
+async function runAcpxJson<T>(
   root: string,
   prompt: string,
   model: string | null,
   schema: object,
   permission: "read" | "approve",
-): Promise<unknown> {
+  parseOutput: (output: unknown) => T,
+): Promise<T> {
   const args = buildAcpxJsonArgs(root, model, permission);
   const result = await runCommandArgs(
     "acpx",
@@ -776,7 +781,7 @@ async function runAcpxJson(
       "provider-failure",
     );
   }
-  return extractAcpxJson(result.stdout);
+  return parseAcpxJsonOutput(result.stdout, parseOutput);
 }
 
 function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "approve"): string {
@@ -798,6 +803,19 @@ function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "a
 }
 
 export function extractAcpxJson(stdout: string): unknown {
+  const { candidates, observedKinds } = acpxJsonCandidates(stdout, false);
+  return parseAcpxJsonCandidates(candidates, observedKinds, (output) => output);
+}
+
+function parseAcpxJsonOutput<T>(stdout: string, parseOutput: (output: unknown) => T): T {
+  const { candidates, observedKinds } = acpxJsonCandidates(stdout, true);
+  return parseAcpxJsonCandidates(candidates, observedKinds, parseOutput);
+}
+
+function acpxJsonCandidates(
+  stdout: string,
+  retrySafe: boolean,
+): { candidates: string[]; observedKinds: Set<string> } {
   const toolCandidates: string[] = [];
   const messageChunks: string[] = [];
   const thoughtChunks: string[] = [];
@@ -846,11 +864,25 @@ export function extractAcpxJson(stdout: string): unknown {
       toolCandidates.push(update.output);
     }
   }
-  const candidates = [
-    ...(messageChunks.length > 0 ? [messageChunks.join("")] : []),
-    ...toolCandidates.toReversed(),
-    ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
-  ];
+  const candidates = retrySafe
+    ? [
+        ...chunkSuffixCandidates(messageChunks),
+        ...toolCandidates.toReversed(),
+        ...chunkSuffixCandidates(thoughtChunks),
+      ]
+    : [
+        ...(messageChunks.length > 0 ? [messageChunks.join("")] : []),
+        ...toolCandidates.toReversed(),
+        ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
+      ];
+  return { candidates, observedKinds };
+}
+
+function parseAcpxJsonCandidates<T>(
+  candidates: string[],
+  observedKinds: Set<string>,
+  parseOutput: (output: unknown) => T,
+): T {
   if (candidates.length === 0) {
     throw new ClawpatchError(
       `acpx provider produced no extractable text. Observed envelope kinds: ` +
@@ -868,7 +900,7 @@ export function extractAcpxJson(stdout: string): unknown {
     try {
       const parsed = extractJson(text);
       if (parsed !== null) {
-        return parsed;
+        return parseOutput(parsed);
       }
       throw new Error("no JSON object found");
     } catch (err) {
@@ -883,6 +915,21 @@ export function extractAcpxJson(stdout: string): unknown {
     8,
     "malformed-output",
   );
+}
+
+function chunkSuffixCandidates(chunks: string[]): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  let suffix = "";
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    suffix = `${chunks[index] ?? ""}${suffix}`;
+    const candidate = suffix.trim();
+    if (candidate.length > 0 && !seen.has(candidate)) {
+      candidates.push(candidate);
+      seen.add(candidate);
+    }
+  }
+  return candidates;
 }
 
 async function runGrokJson(
@@ -1093,6 +1140,7 @@ export const __testing = {
   buildAcpxJsonArgs,
   codexFailureMessage,
   extractAcpxJson,
+  parseAcpxJsonOutput,
   extractOpencodeJson,
   parseAcpxAgent,
   parseCodexJson,

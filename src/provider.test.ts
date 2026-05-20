@@ -14,6 +14,7 @@ const {
   codexFailureMessage,
   extractAcpxJson,
   extractOpencodeJson,
+  parseAcpxJsonOutput,
   parseAcpxAgent,
   parseCodexJson,
   piThinkingLevel,
@@ -387,6 +388,47 @@ describe("extractAcpxJson", () => {
     const stdout = textChunk("agent_message_chunk", 'Here is the JSON:\n{"ok":true}');
 
     expect(extractAcpxJson(stdout)).toEqual({ ok: true });
+  });
+
+  it("prefers a later complete message after a stale retry attempt", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"ok":false}'),
+      textChunk("agent_message_chunk", '{"ok":true}'),
+    ].join("\n");
+
+    expect(
+      parseAcpxJsonOutput(stdout, (output) => {
+        if (
+          typeof output === "object" &&
+          output !== null &&
+          (output as { ok?: unknown }).ok === true
+        ) {
+          return output;
+        }
+        throw new Error("wrong attempt");
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("recovers from a partial message before a retry attempt", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"ok":'),
+      textChunk("agent_message_chunk", '{"ok":true}'),
+    ].join("\n");
+
+    expect(parseAcpxJsonOutput(stdout, (output) => output)).toEqual({ ok: true });
+  });
+
+  it("keeps scanning when a retry-safe suffix is only a nested object", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"findings":[],"inspected":'),
+      textChunk("agent_message_chunk", '{"files":[],"symbols":[],"notes":[]}}'),
+    ].join("\n");
+
+    expect(parseAcpxJsonOutput(stdout, (output) => reviewOutputSchema.parse(output))).toEqual({
+      findings: [],
+      inspected: { files: [], symbols: [], notes: [] },
+    });
   });
 
   it("throws malformed-output with observed envelope kinds when nothing is extractable", () => {
