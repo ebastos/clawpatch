@@ -513,10 +513,13 @@ export async function reportCommand(
     await writeFile(outputPath, output, "utf8");
   }
   if (context.options.json) {
+    const items = findingSummaries(filtered, scopedFeatures);
     return {
       findings: filtered.length,
+      total: filtered.length,
       output: outputPath,
-      items: findingSummaries(filtered, scopedFeatures),
+      items,
+      results: items,
     };
   }
   return {
@@ -691,11 +694,16 @@ async function reviewFeature(
       mode,
       customPrompt,
     );
-    const providerOutput = await provider.review(
-      loaded.root,
-      reviewPrompt.prompt,
-      providerOptions(config),
-    );
+    const providerOutput = await runProviderReviewWithRetry({
+      provider,
+      root: loaded.root,
+      prompt: reviewPrompt.prompt,
+      options: providerOptions(config),
+      context,
+      featureId: feature.featureId,
+      index,
+      total,
+    });
     // Layer 1 drops: per-finding schema violations from parseReviewOutput.
     const droppedFindings: DroppedFinding[] = [...providerOutput.droppedFindings];
     const reviewOutput = {
@@ -793,6 +801,55 @@ async function reviewFeature(
     });
     throw error;
   }
+}
+
+type ReviewProvider = ReturnType<typeof providerByName>;
+type ProviderReviewOutput = Awaited<ReturnType<ReviewProvider["review"]>>;
+
+async function runProviderReviewWithRetry(args: {
+  provider: ReviewProvider;
+  root: string;
+  prompt: string;
+  options: Parameters<ReviewProvider["review"]>[2];
+  context: AppContext;
+  featureId: string;
+  index: number;
+  total: number;
+}): Promise<ProviderReviewOutput> {
+  const { provider, root, prompt, options, context, featureId, index, total } = args;
+  const maxAttempts = 1 + reviewRetries();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await provider.review(root, prompt, options);
+    } catch (error: unknown) {
+      lastError = error;
+      if (!isRetryableReviewError(error) || attempt === maxAttempts) {
+        throw error;
+      }
+      emitProgress(context, "review", "feature-retry", {
+        index: index + 1,
+        total,
+        feature: featureId,
+        attempt,
+        reason: error instanceof ClawpatchError ? error.code : "unknown",
+      });
+    }
+  }
+  throw lastError ?? new ClawpatchError("review retry exhausted", 1, "review-retry-exhausted");
+}
+
+function reviewRetries(): number {
+  const raw = process.env["CLAWPATCH_REVIEW_RETRIES"];
+  if (raw === undefined) {
+    return 1;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 1;
+}
+
+function isRetryableReviewError(error: unknown): boolean {
+  return error instanceof ClawpatchError && error.code === "malformed-output";
 }
 
 export async function revalidateCommand(
@@ -2053,3 +2110,10 @@ function stringFlag(flags: Record<string, string | boolean>, name: string): stri
   const value = flags[name];
   return typeof value === "string" ? value : undefined;
 }
+
+// eslint-disable-next-line no-underscore-dangle
+export const __testing = {
+  isRetryableReviewError,
+  reviewRetries,
+  runProviderReviewWithRetry,
+};

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
+import { z, type ZodError, type ZodIssue, type ZodType } from "zod";
 import { runCommandArgs } from "./exec.js";
 import { ClawpatchError } from "./errors.js";
 import {
@@ -27,6 +27,124 @@ import {
 } from "./types.js";
 
 export { extractJson } from "./provider-json.js";
+
+const ZOD_VALUE_PREVIEW_LIMIT = 80;
+const ZOD_ISSUE_HEAD_LIMIT = 3;
+
+function formatZodPath(path: ReadonlyArray<PropertyKey>): string {
+  if (path.length === 0) {
+    return "<root>";
+  }
+  let out = "";
+  for (let i = 0; i < path.length; i += 1) {
+    const segment = path[i];
+    if (typeof segment === "number") {
+      out += `[${segment}]`;
+    } else if (i === 0) {
+      out += String(segment);
+    } else {
+      out += `.${String(segment)}`;
+    }
+  }
+  return out;
+}
+
+function previewZodValue(value: unknown): string {
+  let rendered: string;
+  if (typeof value === "string") {
+    rendered = JSON.stringify(value);
+  } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+    rendered = String(value);
+  } else if (value === undefined) {
+    return "";
+  } else {
+    try {
+      rendered = JSON.stringify(value) ?? String(value);
+    } catch {
+      rendered = String(value);
+    }
+  }
+  if (rendered.length > ZOD_VALUE_PREVIEW_LIMIT) {
+    return `${rendered.slice(0, ZOD_VALUE_PREVIEW_LIMIT - 1)}…`;
+  }
+  return rendered;
+}
+
+function lookupAtPath(input: unknown, path: ReadonlyArray<PropertyKey>): unknown {
+  let cur: unknown = input;
+  for (const segment of path) {
+    if (cur === null || cur === undefined) {
+      return undefined;
+    }
+    if (typeof segment === "number") {
+      if (!Array.isArray(cur)) {
+        return undefined;
+      }
+      cur = cur[segment];
+    } else if (typeof cur === "object") {
+      cur = (cur as Record<string, unknown>)[String(segment)];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+export function formatZodIssue(issue: ZodIssue, input?: unknown): string {
+  const path = formatZodPath(issue.path);
+  const issueRecord = issue as ZodIssue & {
+    received?: unknown;
+    expected?: unknown;
+    values?: unknown;
+  };
+  let received: unknown;
+  let hasReceived = false;
+  if ("received" in issueRecord && issueRecord.received !== undefined) {
+    received = issueRecord.received;
+    hasReceived = true;
+  } else if (input !== undefined && issue.path.length > 0) {
+    const looked = lookupAtPath(input, issue.path);
+    if (looked !== undefined) {
+      received = looked;
+      hasReceived = true;
+    }
+  }
+  const receivedSegment = hasReceived ? `=${previewZodValue(received)}` : "";
+  let expectedSegment = "";
+  if (Array.isArray(issueRecord.values)) {
+    const list = issueRecord.values.map((v) => String(v)).join(",");
+    expectedSegment = `, expected one of ${list}`;
+  } else if (typeof issueRecord.expected === "string" && issueRecord.expected.length > 0) {
+    expectedSegment = `, expected ${issueRecord.expected}`;
+  }
+  return `${path}${receivedSegment} (${issue.code}${expectedSegment})`;
+}
+
+export function formatZodError(error: ZodError, input?: unknown): string {
+  const issues = error.issues ?? [];
+  if (issues.length === 0) {
+    return "schema validation failed";
+  }
+  const head = issues
+    .slice(0, ZOD_ISSUE_HEAD_LIMIT)
+    .map((issue) => formatZodIssue(issue, input))
+    .join("; ");
+  const more =
+    issues.length > ZOD_ISSUE_HEAD_LIMIT ? ` (+${issues.length - ZOD_ISSUE_HEAD_LIMIT} more)` : "";
+  return `schema validation failed: ${head}${more}`;
+}
+
+function parseOrThrow<T>(schema: ZodType<T>, input: unknown, label: string): T {
+  const result = schema.safeParse(input);
+  if (result.success) {
+    return result.data;
+  }
+  throw new ClawpatchError(
+    `${label}: ${formatZodError(result.error, input)}`,
+    8,
+    "malformed-output",
+  );
+}
 
 export type ProviderOptions = {
   model: string | null;
@@ -176,7 +294,7 @@ const codexProvider: Provider = {
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
     const output = await runCodexJson(root, prompt, options, agentMapJsonSchema);
-    return agentMapOutputSchema.parse(output);
+    return parseOrThrow(agentMapOutputSchema, output, "codex agent-map");
   },
   async review(
     root: string,
@@ -188,7 +306,7 @@ const codexProvider: Provider = {
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
     const output = await runCodexJson(root, prompt, options, fixPlanJsonSchema, "workspace-write");
-    return fixPlanOutputSchema.parse(output);
+    return parseOrThrow(fixPlanOutputSchema, output, "codex fix-plan");
   },
   async revalidate(
     root: string,
@@ -196,7 +314,7 @@ const codexProvider: Provider = {
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
     const output = await runCodexJson(root, prompt, options, revalidateJsonSchema);
-    return revalidateOutputSchema.parse(output);
+    return parseOrThrow(revalidateOutputSchema, output, "codex revalidate");
   },
 };
 
@@ -211,7 +329,7 @@ const opencodeProvider: Provider = {
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
     const output = await runOpencodeJson(root, prompt, options.model, agentMapJsonSchema, true);
-    return agentMapOutputSchema.parse(output);
+    return parseOrThrow(agentMapOutputSchema, output, "opencode agent-map");
   },
   async review(
     root: string,
@@ -223,7 +341,7 @@ const opencodeProvider: Provider = {
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
     const output = await runOpencodeJson(root, prompt, options.model, fixPlanJsonSchema, false);
-    return fixPlanOutputSchema.parse(output);
+    return parseOrThrow(fixPlanOutputSchema, output, "opencode fix-plan");
   },
   async revalidate(
     root: string,
@@ -231,7 +349,7 @@ const opencodeProvider: Provider = {
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
     const output = await runOpencodeJson(root, prompt, options.model, revalidateJsonSchema, true);
-    return revalidateOutputSchema.parse(output);
+    return parseOrThrow(revalidateOutputSchema, output, "opencode revalidate");
   },
 };
 
@@ -253,28 +371,32 @@ const acpxProvider: Provider = {
     return `${version} (tested against ${ACPX_TESTED_VERSIONS})`;
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, agentMapJsonSchema, "read");
-    return agentMapOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, agentMapJsonSchema, "read", (output) =>
+      parseOrThrow(agentMapOutputSchema, output, "acpx agent-map"),
+    );
   },
   async review(
     root: string,
     prompt: string,
     options: ProviderOptions,
   ): Promise<PartitionedReviewOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, reviewJsonSchema, "read");
-    return parseReviewOutput(output);
+    return runAcpxJson(root, prompt, options.model, reviewJsonSchema, "read", (output) =>
+      parseReviewOutput(output),
+    );
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, fixPlanJsonSchema, "approve");
-    return fixPlanOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, fixPlanJsonSchema, "approve", (output) =>
+      parseOrThrow(fixPlanOutputSchema, output, "acpx fix-plan"),
+    );
   },
   async revalidate(
     root: string,
     prompt: string,
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
-    const output = await runAcpxJson(root, prompt, options.model, revalidateJsonSchema, "read");
-    return revalidateOutputSchema.parse(output);
+    return runAcpxJson(root, prompt, options.model, revalidateJsonSchema, "read", (output) =>
+      parseOrThrow(revalidateOutputSchema, output, "acpx revalidate"),
+    );
   },
 };
 
@@ -289,7 +411,7 @@ const grokProvider: Provider = {
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
     const output = await runGrokJson(root, prompt, options.model, agentMapJsonSchema, true);
-    return agentMapOutputSchema.parse(output);
+    return parseOrThrow(agentMapOutputSchema, output, "grok agent-map");
   },
   async review(
     root: string,
@@ -301,7 +423,7 @@ const grokProvider: Provider = {
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
     const output = await runGrokJson(root, prompt, options.model, fixPlanJsonSchema, false);
-    return fixPlanOutputSchema.parse(output);
+    return parseOrThrow(fixPlanOutputSchema, output, "grok fix-plan");
   },
   async revalidate(
     root: string,
@@ -309,7 +431,7 @@ const grokProvider: Provider = {
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
     const output = await runGrokJson(root, prompt, options.model, revalidateJsonSchema, true);
-    return revalidateOutputSchema.parse(output);
+    return parseOrThrow(revalidateOutputSchema, output, "grok revalidate");
   },
 };
 
@@ -326,7 +448,7 @@ const piProvider: Provider = {
   },
   async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
     const output = await runPiJson(root, prompt, options, agentMapJsonSchema, true);
-    return agentMapOutputSchema.parse(output);
+    return parseOrThrow(agentMapOutputSchema, output, "pi map");
   },
   async review(
     root: string,
@@ -338,7 +460,7 @@ const piProvider: Provider = {
   },
   async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
     const output = await runPiJson(root, prompt, options, fixPlanJsonSchema, false);
-    return fixPlanOutputSchema.parse(output);
+    return parseOrThrow(fixPlanOutputSchema, output, "pi fix-plan");
   },
   async revalidate(
     root: string,
@@ -346,7 +468,7 @@ const piProvider: Provider = {
     options: ProviderOptions,
   ): Promise<RevalidateOutput> {
     const output = await runPiJson(root, prompt, options, revalidateJsonSchema, true);
-    return revalidateOutputSchema.parse(output);
+    return parseOrThrow(revalidateOutputSchema, output, "pi revalidate");
   },
 };
 
@@ -862,20 +984,34 @@ export function parseAcpxAgent(model: string | null): {
   return { agent: model.slice(0, idx), agentModel: model.slice(idx + 1) };
 }
 
-async function runAcpxJson(
+function buildAcpxJsonArgs(
+  root: string,
+  model: string | null,
+  permission: "read" | "approve",
+): string[] {
+  const { agent, agentModel } = parseAcpxAgent(model);
+  const permFlag = permission === "read" ? "--approve-reads" : "--approve-all";
+  const args = ["--cwd", root, permFlag, "--format", "json", "--json-strict", "--suppress-reads"];
+  const promptRetries = acpxPromptRetries();
+  if (permission === "read" && promptRetries > 0) {
+    args.push("--prompt-retries", String(promptRetries));
+  }
+  if (agentModel !== null) {
+    args.push("--model", agentModel);
+  }
+  args.push(agent, "exec", "--file", "-");
+  return args;
+}
+
+async function runAcpxJson<T>(
   root: string,
   prompt: string,
   model: string | null,
   schema: object,
   permission: "read" | "approve",
-): Promise<unknown> {
-  const { agent, agentModel } = parseAcpxAgent(model);
-  const permFlag = permission === "read" ? "--approve-reads" : "--approve-all";
-  const args = ["--cwd", root, permFlag, "--format", "json", "--json-strict", "--suppress-reads"];
-  if (agentModel !== null) {
-    args.push("--model", agentModel);
-  }
-  args.push(agent, "exec", "--file", "-");
+  parseOutput: (output: unknown) => T,
+): Promise<T> {
+  const args = buildAcpxJsonArgs(root, model, permission);
   const result = await runCommandArgs(
     "acpx",
     args,
@@ -890,7 +1026,7 @@ async function runAcpxJson(
       "provider-failure",
     );
   }
-  return extractAcpxJson(result.stdout);
+  return parseAcpxJsonOutput(result.stdout, parseOutput);
 }
 
 function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "approve"): string {
@@ -912,6 +1048,19 @@ function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "a
 }
 
 export function extractAcpxJson(stdout: string): unknown {
+  const { candidates, observedKinds } = acpxJsonCandidates(stdout, false);
+  return parseAcpxJsonCandidates(candidates, observedKinds, (output) => output);
+}
+
+function parseAcpxJsonOutput<T>(stdout: string, parseOutput: (output: unknown) => T): T {
+  const { candidates, observedKinds } = acpxJsonCandidates(stdout, true);
+  return parseAcpxJsonCandidates(candidates, observedKinds, parseOutput);
+}
+
+function acpxJsonCandidates(
+  stdout: string,
+  retrySafe: boolean,
+): { candidates: string[]; observedKinds: Set<string> } {
   const toolCandidates: string[] = [];
   const messageChunks: string[] = [];
   const thoughtChunks: string[] = [];
@@ -960,11 +1109,25 @@ export function extractAcpxJson(stdout: string): unknown {
       toolCandidates.push(update.output);
     }
   }
-  const candidates = [
-    ...(messageChunks.length > 0 ? [messageChunks.join("")] : []),
-    ...toolCandidates.toReversed(),
-    ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
-  ];
+  const candidates = retrySafe
+    ? [
+        ...chunkSuffixCandidates(messageChunks),
+        ...toolCandidates.toReversed(),
+        ...chunkSuffixCandidates(thoughtChunks),
+      ]
+    : [
+        ...(messageChunks.length > 0 ? [messageChunks.join("")] : []),
+        ...toolCandidates.toReversed(),
+        ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
+      ];
+  return { candidates, observedKinds };
+}
+
+function parseAcpxJsonCandidates<T>(
+  candidates: string[],
+  observedKinds: Set<string>,
+  parseOutput: (output: unknown) => T,
+): T {
   if (candidates.length === 0) {
     throw new ClawpatchError(
       `acpx provider produced no extractable text. Observed envelope kinds: ` +
@@ -982,7 +1145,7 @@ export function extractAcpxJson(stdout: string): unknown {
     try {
       const parsed = extractJson(text);
       if (parsed !== null) {
-        return parsed;
+        return parseOutput(parsed);
       }
       throw new Error("no JSON object found");
     } catch (err) {
@@ -997,6 +1160,21 @@ export function extractAcpxJson(stdout: string): unknown {
     8,
     "malformed-output",
   );
+}
+
+function chunkSuffixCandidates(chunks: string[]): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  let suffix = "";
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    suffix = `${chunks[index] ?? ""}${suffix}`;
+    const candidate = suffix.trim();
+    if (candidate.length > 0 && !seen.has(candidate)) {
+      candidates.push(candidate);
+      seen.add(candidate);
+    }
+  }
+  return candidates;
 }
 
 async function runGrokJson(
@@ -1189,17 +1367,32 @@ function acpxTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : ACPX_DEFAULT_TIMEOUT_MS;
 }
 
+function acpxPromptRetries(): number {
+  const raw = process.env["CLAWPATCH_ACPX_PROMPT_RETRIES"];
+  if (raw === undefined) {
+    return 1;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 1;
+}
+
 // eslint-disable-next-line no-underscore-dangle
 export const __testing = {
   acpxFailureMessage,
+  acpxPromptRetries,
   addCodexModelArgs,
   addCodexSandboxArgs,
+  buildAcpxJsonArgs,
   codexFailureMessage,
   extractAcpxJson,
+  parseAcpxJsonOutput,
   extractOpencodeJson,
+  formatZodError,
+  formatZodIssue,
   parseAcpxAgent,
   parseCodexJson,
   parseReviewOutput,
+  parseOrThrow,
   piThinkingLevel,
   providerJsonSchema,
 };
