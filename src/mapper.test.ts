@@ -13090,6 +13090,8 @@ add_executable(headerapp include/headers.hpp)
     const root = await fixtureRoot("clawpatch-python-django-routes-");
     await writeFixture(root, "requirements.txt", "django\npytest\n");
     await writeFixture(root, "mysite/__init__.py", "");
+    await writeFixture(root, "api/__init__.py", "");
+    await writeFixture(root, "api/v1/__init__.py", "");
     await writeFixture(
       root,
       "mysite/urls.py",
@@ -13162,6 +13164,34 @@ add_executable(headerapp include/headers.hpp)
     await writeFixture(root, "fallback/__init__.py", "");
     await writeFixture(
       root,
+      "api/urls.py",
+      [
+        "from django.urls import include, path",
+        "from . import views",
+        "",
+        "urlpatterns = [",
+        "    path('users/<int:pk>/', views.user_detail, name='user-detail'),",
+        "    path('status/', views.status, name='status'),",
+        "    path('v1/', include('api.v1.urls')),",
+        "]",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "api/v1/urls.py",
+      [
+        "from django.urls import path",
+        "from . import views",
+        "",
+        "urlpatterns = [",
+        "    path('ping/', views.ping, name='ping'),",
+        "]",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
       "fallback/urls.py",
       [
         "from . import views",
@@ -13172,8 +13202,12 @@ add_executable(headerapp include/headers.hpp)
         "",
       ].join("\n"),
     );
+    await writeFixture(root, "api/views.py", "def user_detail():\n    pass\n");
+    await writeFixture(root, "api/v1/views.py", "def ping():\n    pass\n");
     await writeFixture(root, "mysite/views.py", "class SignupView:\n    pass\n");
     await writeFixture(root, "fallback/views.py", "def dependency_only():\n    pass\n");
+    await writeFixture(root, "api/test_urls.py", "def test_api_urls():\n    pass\n");
+    await writeFixture(root, "api/v1/test_urls.py", "def test_api_v1_urls():\n    pass\n");
     await writeFixture(root, "mysite/test_urls.py", "def test_urls():\n    pass\n");
 
     const project = await detectProject(root);
@@ -13193,6 +13227,10 @@ add_executable(headerapp include/headers.hpp)
         "Django route /signup/",
         "Django route /admin/",
         "Django route /api/",
+        "Django route /api/users/:pk/",
+        "Django route /api/status/",
+        "Django route /api/v1/",
+        "Django route /api/v1/ping/",
         "Django route /tuple-api/",
         "Django route /dependency-only/",
         "Django route /legacy/:slug/",
@@ -13211,6 +13249,28 @@ add_executable(headerapp include/headers.hpp)
       { path: "mysite/test_urls.py", command: "pytest" },
     ]);
     expect(byTitle("Django route /api/")?.entrypoints[0]?.symbol).toBe("api.urls");
+    expect(byTitle("Django route /api/users/:pk/")?.entrypoints[0]).toMatchObject({
+      path: "api/urls.py",
+      symbol: "views.user_detail",
+      route: "/api/users/:pk/",
+    });
+    expect(byTitle("Django route /api/users/:pk/")?.tests).toEqual([
+      { path: "api/test_urls.py", command: "pytest" },
+      { path: "api/v1/test_urls.py", command: "pytest" },
+    ]);
+    expect(byTitle("Django route /api/v1/")?.entrypoints[0]).toMatchObject({
+      path: "api/urls.py",
+      symbol: "api.v1.urls",
+      route: "/api/v1/",
+    });
+    expect(byTitle("Django route /api/v1/ping/")?.entrypoints[0]).toMatchObject({
+      path: "api/v1/urls.py",
+      symbol: "views.ping",
+      route: "/api/v1/ping/",
+    });
+    expect(byTitle("Django route /api/v1/ping/")?.tests).toEqual([
+      { path: "api/v1/test_urls.py", command: "pytest" },
+    ]);
     expect(byTitle("Django route /tuple-api/")?.entrypoints[0]?.symbol).toBeNull();
     expect(byTitle("Django route /signup/")?.entrypoints[0]?.symbol).toBe("SignupView.as_view");
     expect(byTitle("Django route /admin/")?.entrypoints[0]?.symbol).toBe("admin.site.urls");
@@ -13221,6 +13281,10 @@ add_executable(headerapp include/headers.hpp)
     });
     expect(byTitle("Django route /accounts/password/reset/")?.trustBoundaries).toContain("auth");
     expect(byTitle("Django route /signup/")?.trustBoundaries).toContain("auth");
+    expect(routes.filter((feature) => feature.title === "Django route /users/:pk/")).toHaveLength(
+      1,
+    );
+    expect(byTitle("Django route /users/:pk/")?.entrypoints[0]?.path).toBe("mysite/urls.py");
     expect(byTitle("Django route /users/:pk/")?.trustBoundaries).not.toContain("auth");
     expect(byTitle("Django route /orders/")?.trustBoundaries).not.toContain("auth");
     expect(titles).not.toContain("Django route /tenant/");
@@ -13233,6 +13297,9 @@ add_executable(headerapp include/headers.hpp)
     expect(titles).not.toContain("Django route /indented-docs-only/");
     expect(titles).not.toContain("Django route /local-only/");
     expect(titles).not.toContain("Django route /helper/");
+    expect(titles).not.toContain("Django route /status/");
+    expect(titles).not.toContain("Django route /v1/");
+    expect(titles).not.toContain("Django route /v1/ping/");
     expect(titles).not.toContain("Django route /unused/");
   });
 

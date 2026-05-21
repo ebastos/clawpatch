@@ -397,34 +397,132 @@ async function djangoRouteSeeds(
     ...(await walk(root, await pythonSourceRoots(root))).filter(isReviewablePythonSourceFile),
   ]);
   const seeds: FeatureSeed[] = [];
+  const routesByFile = new Map<string, DjangoRoute[]>();
   for (const filePath of routeFiles) {
     const source = await readFile(join(root, filePath), "utf8");
     if (!sourceLooksDjangoUrls(filePath, source, hasDjangoDependency)) {
       continue;
     }
-    for (const route of parseDjangoRoutes(filePath, source)) {
-      const tests = associatedTests([route.filePath], testFiles, testCommand);
-      seeds.push({
-        title: `Django route ${route.routePath}`,
-        summary: djangoRouteSummary(route),
-        kind: "route",
-        source: "python-django-route",
-        confidence: "high",
-        entryPath: route.filePath,
-        symbol: route.symbol,
-        route: route.routePath,
-        command: null,
-        ownedFiles: [{ path: route.filePath, reason: "Django URL route declaration" }],
-        contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
-        tests,
-        tags: ["python", "django", "route"],
-        trustBoundaries: djangoRouteTrustBoundaries(route),
-        testCommand,
-        skipNearbyTests: true,
-      });
+    routesByFile.set(filePath, parseDjangoRoutes(filePath, source));
+  }
+  const includedRouteFiles = await djangoIncludedRouteFiles(root, routesByFile);
+  const routeFilesToSeed = [...routesByFile.keys()].filter(
+    (filePath) => !includedRouteFiles.has(filePath),
+  );
+  for (const filePath of routeFilesToSeed) {
+    const routes = routesByFile.get(filePath) ?? [];
+    for (const route of routes) {
+      for (const expanded of await expandDjangoIncludedRoutes(
+        root,
+        route,
+        routesByFile,
+        new Set([filePath]),
+      )) {
+        const tests = associatedTests([expanded.filePath], testFiles, testCommand);
+        seeds.push({
+          title: `Django route ${expanded.routePath}`,
+          summary: djangoRouteSummary(expanded),
+          kind: "route",
+          source: "python-django-route",
+          confidence: "high",
+          entryPath: expanded.filePath,
+          symbol: expanded.symbol,
+          route: expanded.routePath,
+          command: null,
+          ownedFiles: [{ path: expanded.filePath, reason: "Django URL route declaration" }],
+          contextFiles: tests.map((test) => ({ path: test.path, reason: "associated test" })),
+          tests,
+          tags: ["python", "django", "route"],
+          trustBoundaries: djangoRouteTrustBoundaries(expanded),
+          testCommand,
+          skipNearbyTests: true,
+        });
+      }
     }
   }
   return seeds;
+}
+
+async function djangoIncludedRouteFiles(
+  root: string,
+  routesByFile: Map<string, DjangoRoute[]>,
+): Promise<Set<string>> {
+  const included = new Set<string>();
+  for (const routes of routesByFile.values()) {
+    for (const route of routes) {
+      if (!route.include || route.symbol === null) {
+        continue;
+      }
+      const includePath = await resolveDjangoIncludeModule(root, route.symbol);
+      if (includePath !== null && routesByFile.has(includePath)) {
+        included.add(includePath);
+      }
+    }
+  }
+  return included;
+}
+
+async function expandDjangoIncludedRoutes(
+  root: string,
+  route: DjangoRoute,
+  routesByFile: Map<string, DjangoRoute[]>,
+  visited: Set<string>,
+): Promise<DjangoRoute[]> {
+  const routes = [route];
+  if (!route.include || route.symbol === null) {
+    return routes;
+  }
+  const includePath = await resolveDjangoIncludeModule(root, route.symbol);
+  if (includePath === null || visited.has(includePath)) {
+    return routes;
+  }
+  let includedRoutes = routesByFile.get(includePath);
+  if (includedRoutes === undefined) {
+    const source = await readFile(join(root, includePath), "utf8");
+    includedRoutes = parseDjangoRoutes(includePath, source);
+    routesByFile.set(includePath, includedRoutes);
+  }
+  const nextVisited = new Set([...visited, includePath]);
+  for (const included of includedRoutes) {
+    const mounted = {
+      ...included,
+      routePath: joinDjangoRoutePaths(route.routePath, included.routePath),
+    };
+    routes.push(...(await expandDjangoIncludedRoutes(root, mounted, routesByFile, nextVisited)));
+  }
+  return routes;
+}
+
+async function resolveDjangoIncludeModule(
+  root: string,
+  moduleName: string,
+): Promise<string | null> {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/u.test(moduleName)) {
+    return null;
+  }
+  const modulePath = `${moduleName.replace(/\./gu, "/")}.py`;
+  const candidates = new Set<string>([modulePath]);
+  for (const sourceRoot of await pythonSourceRoots(root)) {
+    candidates.add(`${sourceRoot}/${modulePath}`);
+  }
+  for (const candidate of candidates) {
+    if (await isSafeFile(root, join(root, candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function joinDjangoRoutePaths(prefix: string, route: string): string {
+  if (prefix === "/") {
+    return route;
+  }
+  if (route === "/") {
+    return prefix;
+  }
+  return normalizeDjangoRoutePath(
+    `${prefix.replace(/^\/+|\/+$/gu, "")}/${route.replace(/^\/+/u, "")}`,
+  );
 }
 
 function sourceLooksDjangoUrls(
