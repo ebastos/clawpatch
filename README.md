@@ -117,9 +117,11 @@ Supported provider names today:
 
 - `codex`: local Codex CLI
 - `acpx`: any ACP-compatible coding agent (Codex / Claude / Pi / Gemini / ...) via openclaw/acpx
+- `claude`: local Claude Code CLI in print mode
+- `cursor`: local Cursor Agent CLI (experimental; `doctor` is enabled by default)
 - `grok`: local Grok Build CLI
 - `opencode`: local OpenCode CLI
-- `cursor`: local Cursor Agent CLI (experimental; `doctor` is enabled by default)
+- `pi`: local Pi coding agent in print mode
 - `mock`: deterministic test provider
 - `mock-fail`: failure test provider
 
@@ -150,7 +152,8 @@ Useful flags:
 - `--json`
 - `--plain`
 - `--limit <n>`
-- `--jobs <n>`
+- `--jobs <n>` (default: half of CPU cores, max 10)
+- `--rate-limit-per-minute <n>`
 - `--source <heuristic|auto|agent>`
 - `--feature <id>`
 - `--project <name-or-root>`

@@ -4,6 +4,8 @@
 
 - Added `clawpatch ci` to initialize, map, review, write a report, and append a GitHub Actions step summary in one CI-friendly command.
 - Added `clawpatch open-pr --patch <id>` to turn an applied patch attempt into an explicit GitHub pull request.
+- Added a `claude` provider for routing map, review, fix, and revalidate through the local Claude Code CLI in print mode, thanks @aurokin.
+- Added an experimental `cursor` provider for local Cursor Agent CLI review workflows behind explicit opt-in gates, thanks @aurokin.
 - Added review prompt provenance and budget accounting for included files, omitted files, prompt bytes, and approximate tokens.
 - Added retries for transient acpx JSON review failures via `--prompt-retries` and `CLAWPATCH_REVIEW_RETRIES`, thanks @coletebou.
 - Hardened review ingestion so provider findings must cite included files with valid line ranges and matching evidence quotes.
@@ -20,7 +22,16 @@
 - Added Maven project mapping for root, nested, and multi-module Java/Kotlin projects with Spring role slices, Maven validation defaults, and `pom.xml` detection, thanks @julianshess.
 - Added a release-prep checklist for auditing changelog, package metadata, and dry-run package contents without publishing.
 - Improved bounded source grouping so large flat directories split repeated filename families like command, plugin, doctor, and runtime files into more coherent review slices.
+- Fixed acpx provider error reporting by reading the terminal `result.stopReason` envelope and surfacing non-`end_turn` reasons as typed `ClawpatchError` codes (`agent-cancelled`, `agent-refused`, `agent-truncated`) instead of opaque `malformed-output`, thanks @coletebou.
+- Added website crawler artifacts and a static smoke check for metadata, anchors, and social-card dimensions, thanks @zack-dev-cm.
 - Improved OpenCode malformed JSON diagnostics with output length, event kinds, and a bounded preview, thanks @rohitjavvadi.
+- Fixed finding signatures so equivalent evidence remains stable across re-reviews, thanks @rohitjavvadi.
+- Fixed provider exit-code classification for stdout-only authentication and quota failures, thanks @rohitjavvadi.
+- Improved Node route mapping to preserve literal Express and Hono mount prefixes, thanks @rohitjavvadi.
+- Improved Flask route mapping to preserve static blueprint URL prefixes, thanks @rohitjavvadi.
+- Improved Django route mapping to preserve literal `include()` route prefixes, thanks @rohitjavvadi.
+- Added conservative Rails route mapping for literal root and HTTP verb routes, thanks @rohitjavvadi.
+- Fixed heuristic feature mapping to honor configured path include/exclude filters, thanks @schedawg74.
 - Fixed Express route mapping for aliased Router imports that follow block comment banners, thanks @rohitjavvadi.
 - Fixed Laravel route mapping to include array-style `Route::group` prefixes, thanks @rohitjavvadi.
 - Fixed Fastify route-object mapping to emit static method arrays while ignoring dynamic entries, thanks @rohitjavvadi.
@@ -29,6 +40,8 @@
 - Added `--include-dirty` to review, CI, and revalidation file filters for auditing uncommitted worktree changes, thanks @AsishKumarDalal.
 - Fixed Bun package-manager detection to recognize the text `bun.lock` lockfile, thanks @austinm911.
 - Fixed review-output schema to tolerate optional `reproduction` and `minimumFixScope` fields and zero-valued evidence line numbers (normalized to `null`), recovering 4 of 28 zod issue patterns observed in run `20260517T190759-3c9e9e` (78 errors over 1000 features) that previously dropped whole-feature output instead of the affected finding.
+- Changed `clawpatch review --jobs` and `clawpatch ci --jobs` defaults from a fixed `10` to `floor(cpuCores / 2)` clamped to `[1, 10]`, thanks @coletebou.
+- Added `clawpatch review --rate-limit-per-minute <n>` (also `CLAWPATCH_RPM`) to cap how many provider calls may start within any rolling 60s window across jobs, thanks @coletebou.
 
 ## 0.3.0 - 2026-05-18
 

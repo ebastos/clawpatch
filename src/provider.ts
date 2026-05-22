@@ -278,6 +278,9 @@ export function providerByName(name: string): Provider {
   if (name === "cursor") {
     return cursorProvider;
   }
+  if (name === "claude") {
+    return claudeProvider;
+  }
   if (name === "mock") {
     return mockProvider;
   }
@@ -808,6 +811,410 @@ function compareSemver(left: [number, number, number], right: [number, number, n
   return 0;
 }
 
+const CLAUDE_DEFAULT_TIMEOUT_MS = 180_000;
+const CLAUDE_READ_ONLY_TOOLS = "Read,Grep,Glob";
+const CLAUDE_WRITE_TOOLS = "default";
+
+const claudeProvider: Provider = {
+  name: "claude",
+  async check(root: string): Promise<string> {
+    const result = await runClaudeCommand(["--version"], root, undefined, {
+      includeAuth: false,
+      timeoutMs: claudeTimeoutMs(),
+    });
+    if (result.exitCode !== 0) {
+      throw new ClawpatchError("claude CLI not available", 4, "provider-auth");
+    }
+    const version = result.stdout.trim() || result.stderr.trim();
+    assertClaudeVersionAllowed(version);
+    return version;
+  },
+  async map(root: string, prompt: string, options: ProviderOptions): Promise<AgentMapOutput> {
+    const output = await runClaudeJson(root, prompt, options, agentMapJsonSchema, true);
+    return parseOrThrow(agentMapOutputSchema, output, "claude agent-map");
+  },
+  async review(
+    root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<PartitionedReviewOutput> {
+    const output = await runClaudeJson(root, prompt, options, reviewJsonSchema, true);
+    return parseReviewOutput(output);
+  },
+  async fix(root: string, prompt: string, options: ProviderOptions): Promise<FixPlanOutput> {
+    const output = await runClaudeJson(root, prompt, options, fixPlanJsonSchema, false);
+    return parseOrThrow(fixPlanOutputSchema, output, "claude fix-plan");
+  },
+  async revalidate(
+    root: string,
+    prompt: string,
+    options: ProviderOptions,
+  ): Promise<RevalidateOutput> {
+    const output = await runClaudeJson(root, prompt, options, revalidateJsonSchema, true);
+    return parseOrThrow(revalidateOutputSchema, output, "claude revalidate");
+  },
+};
+
+async function runClaudeJson(
+  root: string,
+  prompt: string,
+  options: ProviderOptions,
+  schema: object,
+  readOnly: boolean,
+): Promise<unknown> {
+  const version = await claudeVersion(root);
+  assertClaudeVersionAllowed(version);
+  const args = claudeArgs(schema, options, readOnly);
+  const result = await runClaudeCommand(args, root, prompt, {
+    includeAuth: true,
+    timeoutMs: claudeTimeoutMs(),
+  });
+  if (result.exitCode !== 0) {
+    throw new ClawpatchError(
+      claudeFailureMessage(result.stdout, result.stderr, result.exitCode),
+      claudeExitCode(result.stdout, result.stderr, result.exitCode),
+      "provider-failure",
+    );
+  }
+  return extractClaudeStructuredOutput(result.stdout);
+}
+
+async function claudeVersion(root: string): Promise<string> {
+  const result = await runClaudeCommand(["--version"], root, undefined, {
+    includeAuth: false,
+    timeoutMs: claudeTimeoutMs(),
+  });
+  if (result.exitCode !== 0) {
+    throw new ClawpatchError("claude CLI not available", 4, "provider-auth");
+  }
+  return result.stdout.trim() || result.stderr.trim();
+}
+
+function claudeArgs(schema: object, options: ProviderOptions, readOnly: boolean): string[] {
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--json-schema",
+    JSON.stringify(schema),
+    "--tools",
+    readOnly ? CLAUDE_READ_ONLY_TOOLS : CLAUDE_WRITE_TOOLS,
+    "--permission-mode",
+    readOnly ? "dontAsk" : "acceptEdits",
+    "--no-session-persistence",
+    "--bare",
+    "--strict-mcp-config",
+    "--mcp-config",
+    JSON.stringify({ mcpServers: {} }),
+    "--disable-slash-commands",
+    "--no-chrome",
+  ];
+  addClaudeModelArgs(args, options);
+  return args;
+}
+
+function addClaudeModelArgs(args: string[], options: ProviderOptions): void {
+  if (options.model !== null) {
+    args.push("--model", options.model);
+  }
+  if (options.reasoningEffort !== null && options.reasoningEffort !== "none") {
+    args.push("--effort", claudeEffort(options.reasoningEffort));
+  }
+}
+
+function claudeEffort(reasoningEffort: ReasoningEffort): string {
+  if (reasoningEffort === "minimal") {
+    return "low";
+  }
+  return reasoningEffort;
+}
+
+async function runClaudeCommand(
+  args: string[],
+  root: string,
+  input: string | undefined,
+  options: { includeAuth: boolean; timeoutMs: number },
+): Promise<Awaited<ReturnType<typeof runCommandArgs>>> {
+  const dir = await mkdtemp(join(tmpdir(), "clawpatch-claude-"));
+  try {
+    const env = claudeEnv(options.includeAuth, dir);
+    return await runCommandArgs(claudeExecutable(), args, root, input, {
+      trimOutput: false,
+      timeoutMs: options.timeoutMs,
+      env,
+      replaceEnv: true,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function claudeEnv(includeAuth: boolean, baseDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  copyPathEnv(env);
+  copyEnv(env, "SystemRoot");
+  copyEnv(env, "ComSpec");
+  copyEnv(env, "PATHEXT");
+  env["HOME"] = join(baseDir, "home");
+  env["XDG_CONFIG_HOME"] = join(baseDir, "xdg-config");
+  env["XDG_CACHE_HOME"] = join(baseDir, "xdg-cache");
+  env["XDG_DATA_HOME"] = join(baseDir, "xdg-data");
+  env["TMPDIR"] = baseDir;
+  env["TEMP"] = baseDir;
+  env["TMP"] = baseDir;
+  if (includeAuth) {
+    copyEnv(env, "ANTHROPIC_API_KEY");
+  }
+  return env;
+}
+
+function copyPathEnv(target: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (key.toLowerCase() === "path") {
+      copyEnv(target, key);
+      return;
+    }
+  }
+}
+
+function copyEnv(target: NodeJS.ProcessEnv, key: string): void {
+  const value = process.env[key];
+  if (value !== undefined && value.length > 0) {
+    target[key] = value;
+  }
+}
+
+function claudeExecutable(): string {
+  const configured = process.env["CLAWPATCH_CLAUDE_BIN"]?.trim();
+  return configured && configured.length > 0 ? configured : "claude";
+}
+
+function extractClaudeStructuredOutput(stdout: string): unknown {
+  const text = stdout.trim();
+  if (text.length === 0) {
+    throw new ClawpatchError("claude provider produced no output", 8, "malformed-output");
+  }
+  const envelopes = extractJsonObjects(text);
+  if (envelopes.length === 0) {
+    throw new ClawpatchError("claude provider produced no JSON envelope", 8, "malformed-output");
+  }
+  for (const envelope of envelopes) {
+    const structured = claudeStructuredOutput(envelope);
+    if (structured.found) {
+      return structured.value;
+    }
+  }
+  throw new ClawpatchError(
+    "claude provider JSON envelope is missing structured_output",
+    8,
+    "malformed-output",
+  );
+}
+
+function claudeStructuredOutput(value: unknown): { found: boolean; value: unknown } {
+  if (typeof value !== "object" || value === null) {
+    return { found: false, value: undefined };
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.hasOwn(record, "error")) {
+    const message = claudeEnvelopeErrorCode(record["error"]) ?? "provider-error";
+    throw new ClawpatchError(
+      `claude provider error: ${message}`,
+      claudeExitCode("", message, 1),
+      "provider-failure",
+    );
+  }
+  if (Object.hasOwn(record, "structured_output")) {
+    const output = record["structured_output"];
+    if (typeof output !== "object" || output === null) {
+      throw new ClawpatchError(
+        "claude provider structured_output is not an object",
+        8,
+        "malformed-output",
+      );
+    }
+    return { found: true, value: output };
+  }
+  return { found: false, value: undefined };
+}
+
+function claudeEnvelopeErrorCode(error: unknown): string | null {
+  if (typeof error === "string") {
+    return null;
+  }
+  if (typeof error !== "object" || error === null) {
+    return null;
+  }
+  const record = error as Record<string, unknown>;
+  for (const key of ["type", "code"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return safeProviderPreview(value);
+    } else if (typeof value === "number") {
+      return String(value);
+    }
+  }
+  return null;
+}
+
+function extractJsonObjects(text: string): unknown[] {
+  const direct = parseJsonObject(text);
+  if (direct.found) {
+    return [direct.value];
+  }
+  const outputs: unknown[] = [];
+  let firstBrace = text.indexOf("{");
+  while (firstBrace !== -1) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let foundEnd = false;
+    for (let index = firstBrace; index < text.length; index += 1) {
+      const ch = text[index];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) {
+        continue;
+      }
+      if (ch === "{") {
+        depth += 1;
+      } else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = text.slice(firstBrace, index + 1);
+          const parsed = parseJsonObject(candidate);
+          if (parsed.found) {
+            outputs.push(parsed.value);
+          }
+          firstBrace = text.indexOf("{", index + 1);
+          foundEnd = true;
+          break;
+        }
+      }
+    }
+    if (!foundEnd) {
+      break;
+    }
+  }
+  return outputs;
+}
+
+function parseJsonObject(text: string): { found: boolean; value: unknown } {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return typeof parsed === "object" && parsed !== null
+      ? { found: true, value: parsed }
+      : { found: false, value: undefined };
+  } catch {
+    return { found: false, value: undefined };
+  }
+}
+
+function claudeFailureMessage(stdout: string, stderr: string, exitCode: number | null): string {
+  if (exitCode === 124 || /timed out/iu.test(stderr)) {
+    return "claude provider timed out";
+  }
+  const combined = `${stderr}\n${claudeFailureSignal(stdout)}`;
+  if (
+    /auth|login|api key|unauthorized|authentication|oauth|not authenticated|api_error_status=(?:401|403)\b/iu.test(
+      combined,
+    )
+  ) {
+    return "claude provider auth/config failed";
+  }
+  if (/quota|rate.?limit|billing|credit|api_error_status=(?:402|429)\b/iu.test(combined)) {
+    return "claude provider quota/rate-limit failed";
+  }
+  const signal = claudeFailureSignal(stdout);
+  return signal.length === 0 ? "claude provider failed" : `claude provider failed: ${signal}`;
+}
+
+function claudeExitCode(stdout: string, stderr: string, exitCode: number | null): number {
+  const combined = `${stderr}\n${claudeFailureSignal(stdout)}`;
+  if (
+    /auth|login|api key|unauthorized|authentication|oauth|not authenticated|api_error_status=(?:401|403)\b/iu.test(
+      combined,
+    )
+  ) {
+    return 4;
+  }
+  if (/quota|rate.?limit|billing|credit|api_error_status=(?:402|429)\b/iu.test(combined)) {
+    return 5;
+  }
+  if (exitCode === 124 || /timed out/iu.test(combined)) {
+    return 1;
+  }
+  return 1;
+}
+
+function claudeFailureSignal(stdout: string): string {
+  const parts: string[] = [];
+  for (const envelope of extractJsonObjects(stdout)) {
+    if (typeof envelope !== "object" || envelope === null) {
+      continue;
+    }
+    const record = envelope as Record<string, unknown>;
+    const errorCode = claudeEnvelopeErrorCode(record["error"]);
+    if (errorCode !== null) {
+      parts.push(`error=${errorCode}`);
+    }
+    for (const key of ["type", "subtype", "api_error_status", "terminal_reason"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        parts.push(`${key}=${safeProviderPreview(value, 80)}`);
+      } else if (typeof value === "number") {
+        parts.push(`${key}=${value}`);
+      }
+    }
+  }
+  return parts.filter((part) => part.length > 0).join("; ");
+}
+
+function assertClaudeVersionAllowed(raw: string): void {
+  const parsed = parseClaudeVersion(raw);
+  if (parsed === null) {
+    return;
+  }
+  if (
+    compareSemver(parsed, [2, 1, 53]) < 0 ||
+    (compareSemver(parsed, [2, 1, 63]) >= 0 && compareSemver(parsed, [2, 1, 84]) < 0)
+  ) {
+    throw new ClawpatchError(
+      `claude CLI version ${parsed.join(".")} is blocked by known security advisories; upgrade Claude Code to 2.1.84 or newer`,
+      4,
+      "provider-auth",
+    );
+  }
+}
+
+function parseClaudeVersion(raw: string): [number, number, number] | null {
+  const match = raw.match(/(\d+)\.(\d+)\.(\d+)/u);
+  if (match === null) {
+    return null;
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function claudeTimeoutMs(): number {
+  const raw =
+    process.env["CLAWPATCH_CLAUDE_TIMEOUT_MS"] ?? process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
+  if (raw === undefined) {
+    return CLAUDE_DEFAULT_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : CLAUDE_DEFAULT_TIMEOUT_MS;
+}
+
 async function runPiJson(
   root: string,
   prompt: string,
@@ -847,7 +1254,7 @@ async function runPiJson(
     if (result.exitCode !== 0) {
       throw new ClawpatchError(
         piFailureMessage(result.stdout, result.stderr),
-        providerExitCode(result.stderr),
+        providerExitCode(result.stdout, result.stderr),
         "provider-failure",
       );
     }
@@ -1122,7 +1529,7 @@ async function runCodexJson(
     if (result.exitCode !== 0) {
       throw new ClawpatchError(
         codexFailureMessage(result.stdout, result.stderr),
-        providerExitCode(result.stderr),
+        providerExitCode(result.stdout, result.stderr),
         "provider-failure",
       );
     }
@@ -1212,7 +1619,7 @@ async function runOpencodeJson(
     if (result.exitCode !== 0) {
       throw new ClawpatchError(
         opencodeFailureMessage(result.stdout, result.stderr),
-        providerExitCode(result.stderr),
+        providerExitCode(result.stdout, result.stderr),
         "provider-failure",
       );
     }
@@ -1272,7 +1679,7 @@ export function extractOpencodeJson(stdout: string): unknown {
               : "unknown";
       throw new ClawpatchError(
         `opencode provider error: ${message}`,
-        providerExitCode(message),
+        providerExitCode("", message),
         "provider-failure",
       );
     }
@@ -1386,24 +1793,55 @@ function buildAcpxPrompt(prompt: string, schema: object, permission: "read" | "a
   );
 }
 
+// Map acpx promptResult.stopReason -> ClawpatchError code/exit pair.
+// `end_turn` is the only successful reason; everything else surfaces as a
+// typed error so callers can distinguish cancellation / refusal / truncation
+// from an actual envelope-shape regression.
+//
+// Source: acpx/src/runtime/engine/manager.ts emits the terminal JSON-RPC
+// response `{"jsonrpc":"2.0","id":N,"result":{"stopReason":<reason>,...}}`
+// for every `session/prompt`. Known reasons in acpx 0.8.0 / claude-agent-acp
+// 0.31.4 are `end_turn | cancelled | refusal | max_tokens | max_turn_requests`
+// (plus the older `max_turns_exceeded` spelling seen in agent-driven turn loops).
+const ACPX_STOP_REASON_CODES: Record<string, string> = {
+  cancelled: "agent-cancelled",
+  refusal: "agent-refused",
+  max_tokens: "agent-truncated",
+  max_turn_requests: "agent-truncated",
+  max_turns_exceeded: "agent-truncated",
+};
+const ACPX_STOP_EXIT_CODES: Record<string, number> = {
+  cancelled: 1,
+  refusal: 1,
+  max_tokens: 8,
+  max_turn_requests: 8,
+  max_turns_exceeded: 8,
+};
+
 export function extractAcpxJson(stdout: string): unknown {
-  const { candidates, observedKinds } = acpxJsonCandidates(stdout, false);
-  return parseAcpxJsonCandidates(candidates, observedKinds, (output) => output);
+  const { candidates, observedKinds, terminalStopReason } = acpxJsonCandidates(stdout, false);
+  return parseAcpxJsonCandidates(candidates, observedKinds, terminalStopReason, (output) => output);
 }
 
 function parseAcpxJsonOutput<T>(stdout: string, parseOutput: (output: unknown) => T): T {
-  const { candidates, observedKinds } = acpxJsonCandidates(stdout, true);
-  return parseAcpxJsonCandidates(candidates, observedKinds, parseOutput);
+  const { candidates, observedKinds, terminalStopReason } = acpxJsonCandidates(stdout, true);
+  return parseAcpxJsonCandidates(candidates, observedKinds, terminalStopReason, parseOutput);
 }
 
 function acpxJsonCandidates(
   stdout: string,
   retrySafe: boolean,
-): { candidates: string[]; observedKinds: Set<string> } {
+): { candidates: string[]; observedKinds: Set<string>; terminalStopReason: string | undefined } {
   const toolCandidates: string[] = [];
   const messageChunks: string[] = [];
   const thoughtChunks: string[] = [];
   const observedKinds = new Set<string>();
+  // Last-seen terminal JSON-RPC response envelope: `{id, result: {stopReason, ...}}`.
+  // acpx emits exactly one per `session/prompt` turn (see
+  // acpx/src/runtime/engine/manager.ts). If this is anything other than
+  // "end_turn" the agent is telling us the turn produced no answer, and we
+  // should surface a typed error instead of trying to parse chunks.
+  let terminalStopReason: string | undefined;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
@@ -1411,6 +1849,8 @@ function acpxJsonCandidates(
     }
     let env: {
       method?: string;
+      id?: unknown;
+      result?: { stopReason?: unknown };
       params?: {
         update?: {
           sessionUpdate?: string;
@@ -1423,6 +1863,17 @@ function acpxJsonCandidates(
       env = JSON.parse(trimmed);
     } catch {
       continue;
+    }
+    if (
+      env !== null &&
+      typeof env === "object" &&
+      Object.prototype.hasOwnProperty.call(env, "id") &&
+      env.result !== undefined &&
+      env.result !== null &&
+      typeof env.result === "object" &&
+      typeof env.result.stopReason === "string"
+    ) {
+      terminalStopReason = env.result.stopReason;
     }
     if (env.method !== "session/update") {
       continue;
@@ -1459,18 +1910,35 @@ function acpxJsonCandidates(
         ...toolCandidates.toReversed(),
         ...(thoughtChunks.length > 0 ? [thoughtChunks.join("")] : []),
       ];
-  return { candidates, observedKinds };
+  return { candidates, observedKinds, terminalStopReason };
 }
 
 function parseAcpxJsonCandidates<T>(
   candidates: string[],
   observedKinds: Set<string>,
+  terminalStopReason: string | undefined,
   parseOutput: (output: unknown) => T,
 ): T {
-  if (candidates.length === 0) {
+  if (terminalStopReason !== undefined && terminalStopReason !== "end_turn") {
+    const code = ACPX_STOP_REASON_CODES[terminalStopReason] ?? "agent-cancelled";
+    const exit = ACPX_STOP_EXIT_CODES[terminalStopReason] ?? 8;
     throw new ClawpatchError(
-      `acpx provider produced no extractable text. Observed envelope kinds: ` +
-        `[${[...observedKinds].join(", ")}]. ` +
+      `acpx prompt did not complete: stopReason="${terminalStopReason}". ` +
+        `Observed envelope kinds: [${[...observedKinds].join(", ")}].`,
+      exit,
+      code,
+    );
+  }
+
+  if (candidates.length === 0) {
+    const stopReasonNote =
+      terminalStopReason === "end_turn"
+        ? `acpx reported stopReason=end_turn but emitted no message chunks. ` +
+          `This is a clawpatch parser bug or a prompt that produced only tool calls. `
+        : ``;
+    throw new ClawpatchError(
+      `acpx provider produced no extractable text. ${stopReasonNote}` +
+        `Observed envelope kinds: [${[...observedKinds].join(", ")}]. ` +
         `acpx envelope shape may have changed since clawpatch was tested ` +
         `against ${ACPX_TESTED_VERSIONS}. Check the installed acpx version.`,
       8,
@@ -1548,7 +2016,7 @@ async function runGrokJson(
     if (result.exitCode !== 0) {
       throw new ClawpatchError(
         `grok provider failed: ${result.stderr || result.stdout}`,
-        providerExitCode(result.stderr),
+        providerExitCode(result.stdout, result.stderr),
         "provider-failure",
       );
     }
@@ -1612,11 +2080,24 @@ function grokEnvelopeText(value: unknown): string | null {
   return null;
 }
 
-function providerExitCode(stderr: string): number {
-  if (/auth|login|api key|unauthorized|wrong api key/iu.test(stderr)) {
+const PROVIDER_AUTH_FAILURE_PATTERN =
+  /\b(?:unauthori[sz]ed|(?:wrong|incorrect|invalid|missing|no)[\s_-]+api[\s_-]*key|api[\s_-]*key\s+(?:is\s+)?(?:missing|required|invalid|expired|not[\s_-]+found|not[\s_-]+set)|[A-Z0-9_]*API[_-]?KEY\s+(?:is\s+)?(?:missing|required|invalid|expired|not[\s_-]+set)|not authenticated|auth(?:entication|orization)?[\s_-]*(?:failed|required|missing|error)|login\s+(?:required|failed)|please\s+(?:log\s*in|login)|missing scopes?|insufficient permissions?|api\.responses\.write)\b/iu;
+const PROVIDER_QUOTA_FAILURE_PATTERN =
+  /\b(?:quota[\s_-]+(?:exceeded|exhausted|reached)|(?:exceeded|exhausted|reached)[\s_-]+(?:your[\s_-]+)?(?:current[\s_-]+)?quota|insufficient[\s_-]+quota|out[\s_-]+of[\s_-]+quota|rate[\s_-]*limit(?:ed|[\s_-]*(?:error|exceeded|reached))|too many requests)\b/iu;
+const PROVIDER_STDERR_AUTH_FAILURE_PATTERN = /auth|login|api key|unauthorized|wrong api key/iu;
+const PROVIDER_STDERR_QUOTA_FAILURE_PATTERN = /quota|rate.?limit/iu;
+
+function providerExitCode(stdout: string, stderr = ""): number {
+  if (
+    PROVIDER_STDERR_AUTH_FAILURE_PATTERN.test(stderr) ||
+    PROVIDER_AUTH_FAILURE_PATTERN.test(stdout)
+  ) {
     return 4;
   }
-  if (/quota|rate.?limit/iu.test(stderr)) {
+  if (
+    PROVIDER_STDERR_QUOTA_FAILURE_PATTERN.test(stderr) ||
+    PROVIDER_QUOTA_FAILURE_PATTERN.test(stdout)
+  ) {
     return 5;
   }
   return 1;
@@ -1721,7 +2202,15 @@ export const __testing = {
   acpxPromptRetries,
   addCodexModelArgs,
   addCodexSandboxArgs,
+  addClaudeModelArgs,
+  assertClaudeVersionAllowed,
   buildAcpxJsonArgs,
+  claudeArgs,
+  claudeEffort,
+  claudeEnv,
+  claudeExitCode,
+  claudeFailureMessage,
+  claudeTimeoutMs,
   codexFailureMessage,
   cursorAgentArgs,
   cursorEnv,
@@ -1730,10 +2219,12 @@ export const __testing = {
   cursorTimeoutMs,
   extractCursorJson,
   extractAcpxJson,
+  extractClaudeStructuredOutput,
   parseAcpxJsonOutput,
   extractOpencodeJson,
   assertCursorRuntimeVersionAllowed,
   parseSemver,
+  parseClaudeVersion,
   formatZodError,
   formatZodIssue,
   parseAcpxAgent,
@@ -1741,5 +2232,6 @@ export const __testing = {
   parseReviewOutput,
   parseOrThrow,
   piThinkingLevel,
+  providerExitCode,
   providerJsonSchema,
 };

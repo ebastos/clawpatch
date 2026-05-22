@@ -7,12 +7,20 @@ import { evidenceRefSchema, revalidateOutputSchema, reviewOutputSchema } from ".
 
 // eslint-disable-next-line no-underscore-dangle
 const {
+  addClaudeModelArgs,
   acpxFailureMessage,
   assertCursorRuntimeVersionAllowed,
   acpxPromptRetries,
   addCodexModelArgs,
   addCodexSandboxArgs,
+  assertClaudeVersionAllowed,
   buildAcpxJsonArgs,
+  claudeArgs,
+  claudeEffort,
+  claudeEnv,
+  claudeExitCode,
+  claudeFailureMessage,
+  claudeTimeoutMs,
   codexFailureMessage,
   cursorAgentArgs,
   cursorEnv,
@@ -21,16 +29,19 @@ const {
   cursorTimeoutMs,
   extractAcpxJson,
   extractCursorJson,
+  extractClaudeStructuredOutput,
   extractOpencodeJson,
   formatZodError,
   formatZodIssue,
   parseAcpxJsonOutput,
   parseAcpxAgent,
+  parseClaudeVersion,
   parseCodexJson,
   parseSemver,
   parseReviewOutput,
   parseOrThrow,
   piThinkingLevel,
+  providerExitCode,
   providerJsonSchema,
 } = __testing;
 
@@ -109,6 +120,30 @@ function expectMalformed(fn: () => unknown, message: RegExp): void {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function terminalEnvelope(stopReason: string, id = 2): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    result: { stopReason, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+  });
+}
+
+function expectStopReasonError(
+  fn: () => unknown,
+  expected: { code: string; exitCode: number; stopReason: string },
+): void {
+  try {
+    fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(ClawpatchError);
+    expect((err as ClawpatchError).code).toBe(expected.code);
+    expect((err as ClawpatchError).exitCode).toBe(expected.exitCode);
+    expect((err as Error).message).toContain(`stopReason="${expected.stopReason}"`);
+    return;
+  }
+  throw new Error(`expected ClawpatchError with code ${expected.code}`);
 }
 
 describe("extractJson", () => {
@@ -578,6 +613,287 @@ describe("Cursor provider", () => {
   });
 });
 
+describe("Claude provider helpers", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("builds read-only structured-output args with isolation flags", () => {
+    const args = claudeArgs(
+      { type: "object" },
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      true,
+    );
+
+    expect(args).toEqual([
+      "-p",
+      "--output-format",
+      "json",
+      "--json-schema",
+      '{"type":"object"}',
+      "--tools",
+      "Read,Grep,Glob",
+      "--permission-mode",
+      "dontAsk",
+      "--no-session-persistence",
+      "--bare",
+      "--strict-mcp-config",
+      "--mcp-config",
+      '{"mcpServers":{}}',
+      "--disable-slash-commands",
+      "--no-chrome",
+    ]);
+  });
+
+  it("builds write-capable fix args only for non-read-only operations", () => {
+    const args = claudeArgs(
+      { type: "object" },
+      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
+      false,
+    );
+
+    expect(args).toContain("default");
+    expect(args).toContain("acceptEdits");
+    expect(args).not.toContain("Read,Grep,Glob");
+    expect(args).not.toContain("dontAsk");
+  });
+
+  it("passes model and supported effort while ignoring skipGitRepoCheck", () => {
+    const args = ["-p"];
+
+    addClaudeModelArgs(args, {
+      model: "sonnet",
+      reasoningEffort: "xhigh",
+      skipGitRepoCheck: true,
+    });
+
+    expect(args).toEqual(["-p", "--model", "sonnet", "--effort", "xhigh"]);
+  });
+
+  it("maps minimal to low and none to no effort flag", () => {
+    expect(claudeEffort("minimal")).toBe("low");
+
+    const args = ["-p"];
+    addClaudeModelArgs(args, { model: null, reasoningEffort: "none", skipGitRepoCheck: false });
+
+    expect(args).toEqual(["-p"]);
+  });
+
+  it("uses a default-deny env allowlist with optional API key", () => {
+    process.env = {
+      PATH: "/bin",
+      HOME: "/secret-home",
+      ANTHROPIC_API_KEY: "secret",
+      OPENAI_API_KEY: "must-not-leak",
+      CLAUDE_CODE_OAUTH_TOKEN: "must-not-leak",
+    };
+
+    expect(claudeEnv(false, "/tmp/claude")).toEqual({
+      PATH: "/bin",
+      HOME: "/tmp/claude/home",
+      XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
+      XDG_CACHE_HOME: "/tmp/claude/xdg-cache",
+      XDG_DATA_HOME: "/tmp/claude/xdg-data",
+      TMPDIR: "/tmp/claude",
+      TEMP: "/tmp/claude",
+      TMP: "/tmp/claude",
+    });
+    expect(claudeEnv(true, "/tmp/claude")).toEqual({
+      PATH: "/bin",
+      HOME: "/tmp/claude/home",
+      XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
+      XDG_CACHE_HOME: "/tmp/claude/xdg-cache",
+      XDG_DATA_HOME: "/tmp/claude/xdg-data",
+      TMPDIR: "/tmp/claude",
+      TEMP: "/tmp/claude",
+      TMP: "/tmp/claude",
+      ANTHROPIC_API_KEY: "secret",
+    });
+  });
+
+  it("preserves a Windows-style Path variable in the Claude env allowlist", () => {
+    process.env = {
+      Path: "C:\\Tools",
+      ANTHROPIC_API_KEY: "secret",
+    };
+
+    expect(claudeEnv(true, "C:\\Temp\\claude")).toMatchObject({
+      Path: "C:\\Tools",
+      ANTHROPIC_API_KEY: "secret",
+    });
+    expect(claudeEnv(true, "C:\\Temp\\claude")).not.toHaveProperty("PATH");
+  });
+
+  it("extracts structured_output from Claude JSON envelopes", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "done",
+      structured_output: { findings: [], inspected: { files: [], symbols: [], notes: [] } },
+    });
+
+    expect(extractClaudeStructuredOutput(stdout)).toEqual({
+      findings: [],
+      inspected: { files: [], symbols: [], notes: [] },
+    });
+  });
+
+  it("extracts structured_output when prose surrounds the JSON envelope", () => {
+    const stdout =
+      "leading text\n" +
+      JSON.stringify({ type: "result", structured_output: { outcome: "fixed" } }) +
+      "\ntrailing text";
+
+    expect(extractClaudeStructuredOutput(stdout)).toEqual({ outcome: "fixed" });
+  });
+
+  it("uses the first JSON envelope with structured_output when multiple objects appear", () => {
+    const stdout = [
+      JSON.stringify({ note: "ignore" }),
+      JSON.stringify({ structured_output: { ok: true } }),
+      JSON.stringify({ structured_output: { ok: false } }),
+    ].join("\n");
+
+    expect(extractClaudeStructuredOutput(stdout)).toEqual({ ok: true });
+  });
+
+  it("throws malformed-output for empty or malformed Claude output", () => {
+    expectMalformed(() => extractClaudeStructuredOutput(""), /claude provider produced no output/u);
+    expectMalformed(
+      () => extractClaudeStructuredOutput("not json"),
+      /claude provider produced no JSON envelope/u,
+    );
+    expectMalformed(
+      () => extractClaudeStructuredOutput(JSON.stringify({ result: "{}" })),
+      /missing structured_output/u,
+    );
+    expectMalformed(
+      () => extractClaudeStructuredOutput(JSON.stringify({ structured_output: "nope" })),
+      /structured_output is not an object/u,
+    );
+  });
+
+  it("turns Claude error envelopes into provider failures", () => {
+    try {
+      extractClaudeStructuredOutput(JSON.stringify({ error: { type: "authentication_failed" } }));
+    } catch (err) {
+      expect(err).toBeInstanceOf(ClawpatchError);
+      expect((err as ClawpatchError).exitCode).toBe(4);
+      expect((err as ClawpatchError).code).toBe("provider-failure");
+      return;
+    }
+    throw new Error("expected Claude provider failure");
+  });
+
+  it("does not include stdout or prompt previews in Claude failure messages", () => {
+    const message = claudeFailureMessage("SOURCE_CONTEXT_SECRET", "SOURCE_CONTEXT_SECRET", 1);
+
+    expect(message).toBe("claude provider failed");
+    expect(message).not.toContain("SOURCE_CONTEXT_SECRET");
+  });
+
+  it("classifies Claude stderr failures without leaking stderr text", () => {
+    const auth = claudeFailureMessage("", "authentication failed for SOURCE_CONTEXT_SECRET", 1);
+    const quota = claudeFailureMessage("", "rate limit exceeded for SOURCE_CONTEXT_SECRET", 1);
+
+    expect(auth).toBe("claude provider auth/config failed");
+    expect(quota).toBe("claude provider quota/rate-limit failed");
+    expect(auth).not.toContain("SOURCE_CONTEXT_SECRET");
+    expect(quota).not.toContain("SOURCE_CONTEXT_SECRET");
+  });
+
+  it("uses redacted Claude stdout envelope signals for nonzero failures", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      api_error_status: 401,
+      error: { type: "authentication_failed", message: "SOURCE_CONTEXT_SECRET" },
+      result: "SOURCE_CONTEXT_SECRET",
+    });
+
+    const message = claudeFailureMessage(stdout, "", 1);
+
+    expect(message).toBe("claude provider auth/config failed");
+    expect(message).not.toContain("SOURCE_CONTEXT_SECRET");
+    expect(claudeExitCode(stdout, "", 1)).toBe(4);
+  });
+
+  it("classifies Claude print-mode API status envelopes", () => {
+    const auth = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      api_error_status: 401,
+      result: "SOURCE_CONTEXT_SECRET",
+    });
+    const quota = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      api_error_status: 429,
+      result: "SOURCE_CONTEXT_SECRET",
+    });
+
+    expect(claudeFailureMessage(auth, "", 1)).toBe("claude provider auth/config failed");
+    expect(claudeExitCode(auth, "", 1)).toBe(4);
+    expect(claudeFailureMessage(quota, "", 1)).toBe("claude provider quota/rate-limit failed");
+    expect(claudeExitCode(quota, "", 1)).toBe(5);
+    expect(claudeFailureMessage(auth, "", 1)).not.toContain("SOURCE_CONTEXT_SECRET");
+    expect(claudeFailureMessage(quota, "", 1)).not.toContain("SOURCE_CONTEXT_SECRET");
+  });
+
+  it("omits Claude error.message from stdout failure signals", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      error: { code: "invalid_request", message: "SOURCE_CONTEXT_SECRET" },
+      result: "SOURCE_CONTEXT_SECRET",
+    });
+
+    const message = claudeFailureMessage(stdout, "", 1);
+
+    expect(message).toContain("error=invalid_request");
+    expect(message).not.toContain("SOURCE_CONTEXT_SECRET");
+  });
+
+  it("classifies Claude provider failures by exit convention", () => {
+    expect(claudeExitCode("", "authentication failed", 1)).toBe(4);
+    expect(claudeExitCode("", "rate limit exceeded", 1)).toBe(5);
+    expect(claudeExitCode("", "command timed out after 1ms", 124)).toBe(1);
+    expect(claudeExitCode("", "other", 1)).toBe(1);
+  });
+
+  it("parses Claude versions and blocks verified vulnerable ranges", () => {
+    expect(parseClaudeVersion("2.1.144 (Claude Code)")).toEqual([2, 1, 144]);
+    expect(parseClaudeVersion("not a version")).toBeNull();
+
+    expect(() => assertClaudeVersionAllowed("2.1.52 (Claude Code)")).toThrow(/blocked/u);
+    expect(() => assertClaudeVersionAllowed("2.1.63 (Claude Code)")).toThrow(/blocked/u);
+    expect(() => assertClaudeVersionAllowed("2.1.83 (Claude Code)")).toThrow(/blocked/u);
+    expect(() => assertClaudeVersionAllowed("2.1.53 (Claude Code)")).not.toThrow();
+    expect(() => assertClaudeVersionAllowed("2.1.84 (Claude Code)")).not.toThrow();
+    expect(() => assertClaudeVersionAllowed("2.1.144 (Claude Code)")).not.toThrow();
+    expect(() => assertClaudeVersionAllowed("unknown")).not.toThrow();
+  });
+
+  it("uses Claude-specific timeout before generic provider timeout", () => {
+    delete process.env["CLAWPATCH_CLAUDE_TIMEOUT_MS"];
+    delete process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"];
+    expect(claudeTimeoutMs()).toBe(180_000);
+
+    process.env["CLAWPATCH_PROVIDER_TIMEOUT_MS"] = "2000";
+    expect(claudeTimeoutMs()).toBe(2000);
+
+    process.env["CLAWPATCH_CLAUDE_TIMEOUT_MS"] = "3000";
+    expect(claudeTimeoutMs()).toBe(3000);
+
+    process.env["CLAWPATCH_CLAUDE_TIMEOUT_MS"] = "bad";
+    expect(claudeTimeoutMs()).toBe(180_000);
+  });
+});
+
 function schemaKeys(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.flatMap(schemaKeys);
@@ -634,6 +950,57 @@ describe("codexFailureMessage", () => {
     expect(message).toContain("codex provider failed");
     expect(message).toContain("api.responses.write");
     expect(message).toContain("restricted key scopes");
+  });
+});
+
+describe("providerExitCode", () => {
+  it("classifies auth failures from stdout-only provider output", () => {
+    expect(providerExitCode("Unauthorized: Wrong API Key", "")).toBe(4);
+    expect(providerExitCode("auth required", "")).toBe(4);
+    expect(providerExitCode("Incorrect API key provided", "")).toBe(4);
+    expect(providerExitCode("invalid_api_key", "")).toBe(4);
+    expect(providerExitCode("API key is required", "")).toBe(4);
+    expect(providerExitCode("API key not found", "")).toBe(4);
+    expect(providerExitCode("OPENAI_API_KEY is not set", "")).toBe(4);
+    expect(providerExitCode("insufficient permissions", "")).toBe(4);
+    expect(providerExitCode("api.responses.write scope is required", "")).toBe(4);
+    expect(providerExitCode("AuthenticationError: invalid credentials", "")).toBe(4);
+    expect(providerExitCode("authentication_error", "")).toBe(4);
+    expect(providerExitCode("AUTH_REQUIRED", "")).toBe(4);
+  });
+
+  it("classifies quota failures from stdout-only provider output", () => {
+    expect(providerExitCode("quota exceeded for this organization", "")).toBe(5);
+    expect(providerExitCode("You exceeded your current quota", "")).toBe(5);
+    expect(providerExitCode("insufficient_quota", "")).toBe(5);
+    expect(providerExitCode("quota_exceeded", "")).toBe(5);
+    expect(providerExitCode("RateLimitError: retry later", "")).toBe(5);
+    expect(providerExitCode("rate_limit_error", "")).toBe(5);
+  });
+
+  it("does not classify benign auth-looking stdout as auth failures", () => {
+    expect(providerExitCode("author: Jane", "")).toBe(1);
+    expect(providerExitCode("registered oauth-callback route", "")).toBe(1);
+    expect(providerExitCode("authority metadata loaded", "")).toBe(1);
+  });
+
+  it("does not classify generic rate-limiting discussion as quota failures", () => {
+    expect(providerExitCode("consider adding rate-limiting to this endpoint", "")).toBe(1);
+    expect(providerExitCode("document the rate limit policy for future work", "")).toBe(1);
+  });
+
+  it("keeps classifying real rate-limit failures", () => {
+    expect(providerExitCode("rate limit exceeded for this organization", "")).toBe(5);
+  });
+
+  it("keeps classifying stderr failures", () => {
+    expect(providerExitCode("", "please login before running the provider")).toBe(4);
+    expect(providerExitCode("", "expired API key")).toBe(4);
+    expect(providerExitCode("", "auth credentials not found")).toBe(4);
+  });
+
+  it("keeps generic failures when neither stream has a known signal", () => {
+    expect(providerExitCode("process exited unexpectedly", "")).toBe(1);
   });
 });
 
@@ -793,6 +1160,81 @@ describe("extractAcpxJson", () => {
     expect(extractAcpxJson(stdout)).toEqual({ ok: true });
   });
 
+  it("preserves end_turn happy path with message chunks", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"ok":'),
+      textChunk("agent_message_chunk", "true}"),
+      terminalEnvelope("end_turn"),
+    ].join("\n");
+
+    expect(extractAcpxJson(stdout)).toEqual({ ok: true });
+  });
+
+  it("surfaces stopReason cancelled as agent-cancelled", () => {
+    const stdout = [
+      updateEnvelope({ sessionUpdate: "usage_update", usage: { inputTokens: 1, outputTokens: 0 } }),
+      terminalEnvelope("cancelled"),
+    ].join("\n");
+
+    expectStopReasonError(() => extractAcpxJson(stdout), {
+      code: "agent-cancelled",
+      exitCode: 1,
+      stopReason: "cancelled",
+    });
+  });
+
+  it("surfaces stopReason refusal as agent-refused", () => {
+    const stdout = terminalEnvelope("refusal");
+
+    expectStopReasonError(() => extractAcpxJson(stdout), {
+      code: "agent-refused",
+      exitCode: 1,
+      stopReason: "refusal",
+    });
+  });
+
+  it("surfaces stopReason max_tokens as agent-truncated", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"partial":'),
+      terminalEnvelope("max_tokens"),
+    ].join("\n");
+
+    expectStopReasonError(() => extractAcpxJson(stdout), {
+      code: "agent-truncated",
+      exitCode: 8,
+      stopReason: "max_tokens",
+    });
+  });
+
+  it("surfaces stopReason max_turn_requests as agent-truncated", () => {
+    const stdout = terminalEnvelope("max_turn_requests");
+
+    expectStopReasonError(() => extractAcpxJson(stdout), {
+      code: "agent-truncated",
+      exitCode: 8,
+      stopReason: "max_turn_requests",
+    });
+  });
+
+  it("maps unknown stopReason defensively to agent-cancelled", () => {
+    const stdout = terminalEnvelope("future_reason_xyz");
+
+    expectStopReasonError(() => extractAcpxJson(stdout), {
+      code: "agent-cancelled",
+      exitCode: 8,
+      stopReason: "future_reason_xyz",
+    });
+  });
+
+  it("falls back to current behavior with no terminal envelope", () => {
+    const stdout = [
+      textChunk("agent_message_chunk", '{"legacy":'),
+      textChunk("agent_message_chunk", "true}"),
+    ].join("\n");
+
+    expect(extractAcpxJson(stdout)).toEqual({ legacy: true });
+  });
+
   it("survives a 256-line NDJSON fixture over 8KB", () => {
     const filler = Array.from({ length: 255 }, (_, idx) =>
       updateEnvelope({
@@ -947,6 +1389,38 @@ describe("extractOpencodeJson", () => {
       return;
     }
     throw new Error("expected provider auth failure");
+  });
+
+  it("classifies opencode stderr-style error events as provider auth failures", () => {
+    const stdout = JSON.stringify({
+      type: "error",
+      error: { data: { message: "auth credentials not found" } },
+    });
+
+    try {
+      extractOpencodeJson(stdout);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ClawpatchError);
+      expect((err as ClawpatchError).exitCode).toBe(4);
+      return;
+    }
+    throw new Error("expected provider auth failure");
+  });
+
+  it("classifies opencode stderr-style error events as provider quota failures", () => {
+    const stdout = JSON.stringify({
+      type: "error",
+      error: { data: { message: "rate limit" } },
+    });
+
+    try {
+      extractOpencodeJson(stdout);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ClawpatchError);
+      expect((err as ClawpatchError).exitCode).toBe(5);
+      return;
+    }
+    throw new Error("expected provider quota failure");
   });
 });
 
@@ -1153,6 +1627,7 @@ describe("parseOrThrow", () => {
 describe("providerByName", () => {
   it("returns provider instances for optional CLI-backed providers", () => {
     expect(providerByName("acpx").name).toBe("acpx");
+    expect(providerByName("claude").name).toBe("claude");
     expect(providerByName("grok").name).toBe("grok");
     expect(providerByName("opencode").name).toBe("opencode");
     expect(providerByName("pi").name).toBe("pi");
