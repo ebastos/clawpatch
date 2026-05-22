@@ -206,15 +206,19 @@ Review feature slices and persist findings.
 Usage:
 
 ```bash
-clawpatch review [--feature <id>] [--kind <kind>] [--limit <n>] [--dry-run] [--provider <name>] [--model <name>] [--reasoning-effort <level>] [--resume <runId>]
+clawpatch review [--feature <id>] [--kind <kind>] [--limit <n>] [--jobs <n>] [--rate-limit-per-minute <n>] [--since <ref>] [--mode <mode>] [--dry-run] [--provider <name>] [--model <name>] [--reasoning-effort <level>] [--resume <runId>]
 ```
 
 Behavior:
 
 - Claims pending or selected features.
+- Uses a bounded worker pool; default jobs are half of CPU cores, clamped to 1-10.
+- Optionally rate-limits provider call starts with a rolling 60 second cap.
 - Assembles bounded prompt context.
 - Calls provider.
 - Parses strict JSON.
+- Drops invalid findings without dropping valid sibling findings.
+- Requires evidence paths, line ranges, and quotes to match included prompt files.
 - Writes append-only analysis entry.
 - Writes findings.
 - Releases locks.
@@ -698,13 +702,19 @@ Mappers:
 - Node package bins from `package.json`.
 - Node scripts from `package.json`.
 - Node workspace and Nx project metadata as project roots for framework mappers.
+- Package-less Node/TypeScript app roots under monorepo folders such as `apps/*` and `packages/*` when positive source or framework signals are present.
 - TypeScript/JavaScript CLI command registries when cheap to detect.
 - Next.js `app/**/page.*`, `app/**/route.*`, `pages/**` at the repo root or inside discovered project roots.
-- Express/Fastify/Hono route registrations.
+- Express/Fastify/Hono route registrations, including literal mounted route prefixes.
+- Python metadata, source groups, console scripts, pytest suites, Flask/FastAPI/Django routes, and literal Django `include()` prefixes.
+- Ruby/Rails metadata, source groups, tests, and literal Rails root/HTTP verb routes.
+- Java/Kotlin Gradle and Maven modules, default build/test commands, and semantic role groups.
 - Go `cmd/*` commands and `internal/*` packages.
 - Rust Cargo commands, libraries, workspace crates, and integration tests.
+- C#/.NET solutions/projects, ASP.NET Core endpoints, source groups, and test projects.
 - C/C++ standalone `main()` files, CMake targets, and autotools targets.
 - SwiftPM executable targets, library targets, and test suites.
+- Laravel/PHP projects, controllers, requests, jobs, commands, services, models, migrations, seeders, and tests.
 - Test suites from common test file globs.
 - Config/release features from package/build/release files.
 - Shared infra from auth/session/db/process/fs/network/secrets files.
@@ -885,9 +895,16 @@ Revalidation must not mark fixed from model opinion alone when targeted commands
 
 ## Provider adapters
 
-Initial provider:
+Implemented providers:
 
-- OpenAI or Codex-backed adapter, whichever is simplest at implementation time.
+- `codex`: local Codex CLI.
+- `acpx`: ACP-compatible agents through `acpx`.
+- `claude`: Claude Code CLI in print mode.
+- `cursor`: experimental Cursor Agent CLI integration.
+- `grok`: Grok Build CLI.
+- `opencode`: OpenCode CLI.
+- `pi`: pi coding agent.
+- `mock` / `mock-fail`: deterministic test providers.
 
 Adapter contract:
 
@@ -904,6 +921,9 @@ type ProviderAdapter = {
 Provider errors:
 
 - auth
+- agent-cancelled
+- agent-refused
+- agent-truncated
 - quota
 - rate-limit
 - transient
@@ -1121,9 +1141,5 @@ fixtures/
 
 ## Open questions
 
-- First provider path: direct OpenAI Responses API vs Codex task integration.
 - Check in feature map by default or keep all generated state ignored.
-- Exact command parser library.
-- Exact runtime minimum Node version.
-- Whether review should support concurrent feature claims in v0.1 or wait until v0.2.
 - Whether `fix` should create a temporary branch by default in a later release.
