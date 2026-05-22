@@ -13220,6 +13220,100 @@ add_executable(headerapp include/headers.hpp)
     expect(admin?.trustBoundaries).toContain("auth");
   });
 
+  it("maps static Flask blueprint url prefixes", async () => {
+    const root = await fixtureRoot("clawpatch-python-flask-blueprint-prefixes-");
+    await writeFixture(root, "requirements.txt", "Flask\npytest\n");
+    await writeFixture(
+      root,
+      "web/app.py",
+      [
+        "from flask import Blueprint, Flask",
+        "",
+        "app = Flask(__name__)",
+        "API_PREFIX = '/dynamic'",
+        "api_bp = Blueprint('api', __name__, url_prefix='/api')",
+        "registered_bp = Blueprint('registered', __name__)",
+        "dynamic_bp = Blueprint('dynamic', __name__, url_prefix=API_PREFIX)",
+        "runtime_bp = Blueprint('runtime', __name__)",
+        "overridden_bp = Blueprint('overridden', __name__, url_prefix='/constructor')",
+        "none_bp = Blueprint('none', __name__, url_prefix='/kept')",
+        "none_comment_bp = Blueprint('none_comment', __name__, url_prefix='/kept-comment')",
+        "constructor_comment_bp = Blueprint(",
+        "    'constructor_comment',",
+        "    __name__,",
+        "    url_prefix='/constructor-comment'  # use constructor literal",
+        ")",
+        "literal_comment_bp = Blueprint('literal_comment', __name__, url_prefix='/constructor')",
+        "app.register_blueprint(registered_bp, url_prefix='/registered')",
+        "app.register_blueprint(runtime_bp, url_prefix=API_PREFIX)",
+        "app.register_blueprint(overridden_bp, url_prefix=API_PREFIX)",
+        "app.register_blueprint(none_bp, url_prefix=None)",
+        "app.register_blueprint(",
+        "    none_comment_bp,",
+        "    url_prefix=None  # use constructor default",
+        ")",
+        "app.register_blueprint(",
+        "    literal_comment_bp,",
+        "    url_prefix='/literal'  # use literal override",
+        ")",
+        "",
+        "@api_bp.route('/users')",
+        "def users():",
+        "    return 'users'",
+        "",
+        "@registered_bp.route('/reports', methods=['POST'])",
+        "def reports():",
+        "    return 'reports'",
+        "",
+        "@dynamic_bp.route('/metrics')",
+        "def metrics():",
+        "    return 'metrics'",
+        "",
+        "@runtime_bp.route('/events')",
+        "def events():",
+        "    return 'events'",
+        "",
+        "@overridden_bp.route('/health')",
+        "def health():",
+        "    return 'health'",
+        "",
+        "@none_bp.route('/ready')",
+        "def ready():",
+        "    return 'ready'",
+        "",
+        "@none_comment_bp.route('/ready')",
+        "def ready_with_comment():",
+        "    return 'ready'",
+        "",
+        "@constructor_comment_bp.route('/ready')",
+        "def ready_with_constructor_comment():",
+        "    return 'ready'",
+        "",
+        "@literal_comment_bp.route('/ready')",
+        "def ready_with_literal_comment():",
+        "    return 'ready'",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).toContain("Flask route GET /api/users");
+    expect(titles).toContain("Flask route POST /registered/reports");
+    expect(titles).toContain("Flask route GET /metrics");
+    expect(titles).toContain("Flask route GET /events");
+    expect(titles).toContain("Flask route GET /health");
+    expect(titles).toContain("Flask route GET /kept/ready");
+    expect(titles).toContain("Flask route GET /kept-comment/ready");
+    expect(titles).toContain("Flask route GET /constructor-comment/ready");
+    expect(titles).toContain("Flask route GET /literal/ready");
+    expect(titles).not.toContain("Flask route GET /dynamic/metrics");
+    expect(titles).not.toContain("Flask route GET /dynamic/events");
+    expect(titles).not.toContain("Flask route GET /constructor/health");
+  });
+
   it("maps root-level Flask entry files and non-list methods", async () => {
     const root = await fixtureRoot("clawpatch-python-flask-root-routes-");
     await writeFixture(root, "requirements.txt", "Flask\npytest\n");
