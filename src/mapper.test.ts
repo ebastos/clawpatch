@@ -3072,6 +3072,219 @@ describe("mapFeatures", () => {
     expect(routes.some((route) => route.endsWith(" /template-dynamic"))).toBe(false);
   });
 
+  it("preserves literal Express and Hono mount prefixes for child routes", async () => {
+    const root = await fixtureRoot("clawpatch-node-mounted-route-prefixes-");
+    await writeFixture(
+      root,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "mounted-route-server",
+          dependencies: { express: "1.0.0", hono: "1.0.0" },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFixture(
+      root,
+      "src/express-mounted.ts",
+      [
+        "import express, { Router } from 'express';",
+        "import ensureLoggedIn from './auth';",
+        "",
+        "const app = express();",
+        "const apiApp = express();",
+        "const router = Router();",
+        "const nestedRouter = Router();",
+        "const middlewareRouter = Router();",
+        "const genericMiddlewareRouter = Router();",
+        "const asyncMiddlewareRouter = Router();",
+        "const expressionMiddlewareRouter = Router();",
+        "const importedMiddlewareRouter = Router();",
+        "const pathlessRouter = Router();",
+        "const directPathlessRouter = Router();",
+        "const firstPathlessRouter = Router();",
+        "const secondPathlessRouter = Router();",
+        "const arrayRouter = Router();",
+        "const wildcardRouter = Router();",
+        "const dynamicRouter = Router();",
+        "const dynamicParent = Router();",
+        "const dynamicChild = Router();",
+        "const authPathRouter = Router();",
+        "const tenantRouter = Router();",
+        "const memberRouter = Router();",
+        "const falseRouter = Router();",
+        "const notApp = createClient();",
+        "app.use('/api', router);",
+        "app.use(dynamicTenant, router);",
+        "app.use('/service', apiApp);",
+        "router.use('/v1', nestedRouter);",
+        "app.use('/middleware', requireAuth, middlewareRouter);",
+        "apiApp.use(mw, genericMiddlewareRouter);",
+        "apiApp.use(amw, asyncMiddlewareRouter);",
+        "apiApp.use(express.json(), expressionMiddlewareRouter);",
+        "apiApp.use(ensureLoggedIn, importedMiddlewareRouter);",
+        "apiApp.use(requireAuth, pathlessRouter);",
+        "apiApp.use(directPathlessRouter);",
+        "apiApp.use(firstPathlessRouter, secondPathlessRouter);",
+        "app.use(['/array', '/alt-array'], arrayRouter);",
+        "app.use('*', wildcardRouter);",
+        "app.use(dynamicPrefix, dynamicRouter);",
+        "app.use(dynamicBase, dynamicParent);",
+        "dynamicParent.use('/v1', dynamicChild);",
+        "app.use(authPath, authPathRouter);",
+        "app.use(tenant, tenantRouter);",
+        "server.app.use('/member', memberRouter);",
+        "notApp.use('/false', falseRouter);",
+        "router.get('/users', listUsers);",
+        "router.route('/reports').get(listReports);",
+        "nestedRouter.post('/teams', createTeam);",
+        "apiApp.delete('/sessions/:id', deleteSession);",
+        "middlewareRouter.get('/users', listMiddlewareUsers);",
+        "genericMiddlewareRouter.get('/generic-middleware-users', listGenericMiddlewareUsers);",
+        "asyncMiddlewareRouter.get('/async-middleware-users', listAsyncMiddlewareUsers);",
+        "expressionMiddlewareRouter.get('/json-users', listJsonUsers);",
+        "importedMiddlewareRouter.get('/imported-users', listImportedUsers);",
+        "pathlessRouter.get('/pathless-users', listPathlessUsers);",
+        "directPathlessRouter.get('/direct-pathless-users', listDirectPathlessUsers);",
+        "firstPathlessRouter.get('/first-pathless-users', listFirstPathlessUsers);",
+        "secondPathlessRouter.get('/second-pathless-users', listSecondPathlessUsers);",
+        "arrayRouter.get('/array-users', listArrayUsers);",
+        "wildcardRouter.get('/wildcard-users', listWildcardUsers);",
+        "dynamicRouter.get('/dynamic-users', dynamicUsers);",
+        'dynamicChild.get("/dynamic-child-users", dynamicChildUsers);',
+        'authPathRouter.get("/auth-path-users", authPathUsers);',
+        'tenantRouter.get("/tenant-users", tenantUsers);',
+        'memberRouter.get("/member-users", memberUsers);',
+        "falseRouter.get('/false-users', falseUsers);",
+        "function createClient() { return { use() {} }; }",
+        "function listUsers() {}",
+        "function listReports() {}",
+        "function createTeam() {}",
+        "function deleteSession() {}",
+        "function requireAuth() {}",
+        "function mw() {}",
+        "async function amw() {}",
+        "function listMiddlewareUsers() {}",
+        "function listGenericMiddlewareUsers() {}",
+        "function listAsyncMiddlewareUsers() {}",
+        "function listJsonUsers() {}",
+        "function listImportedUsers() {}",
+        "function listPathlessUsers() {}",
+        "function listDirectPathlessUsers() {}",
+        "function listFirstPathlessUsers() {}",
+        "function listSecondPathlessUsers() {}",
+        "function listArrayUsers() {}",
+        "function listWildcardUsers() {}",
+        "function dynamicUsers() {}",
+        "function dynamicChildUsers() {}",
+        "function authPathUsers() {}",
+        "function tenantUsers() {}",
+        "function memberUsers() {}",
+        "function falseUsers() {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/hono-mounted.ts",
+      [
+        "import { Hono } from 'hono';",
+        "",
+        "const app = new Hono();",
+        "const subApp = new Hono();",
+        "const nestedSubApp = new Hono();",
+        "const dynamicSubApp = new Hono();",
+        "const falseSubApp = new Hono();",
+        "const client = createClient();",
+        "app.route('/api', subApp);",
+        "subApp.route('/v1', nestedSubApp);",
+        "app.route(dynamicPrefix, dynamicSubApp);",
+        "client.route('/false', falseSubApp);",
+        "subApp.get('/users', listUsers);",
+        "nestedSubApp.delete('/sessions/:id', deleteSession);",
+        "dynamicSubApp.get('/dynamic-users', dynamicUsers);",
+        "falseSubApp.get('/false-users', falseUsers);",
+        "function createClient() { return { route() {} }; }",
+        "function listUsers() {}",
+        "function deleteSession() {}",
+        "function dynamicUsers() {}",
+        "function falseUsers() {}",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "src/express-dynamic-mw.ts",
+      [
+        "import express, { Router } from 'express';",
+        "",
+        "const app = express();",
+        "const router = Router();",
+        "const mw = dynamicPrefix;",
+        "app.use(mw, router);",
+        "router.get('/dynamic-mw-users', listDynamicMwUsers);",
+        "function listDynamicMwUsers() {}",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).toEqual(
+      expect.arrayContaining([
+        "Express route GET /api/users",
+        "Express route GET /api/reports",
+        "Express route POST /api/v1/teams",
+        "Express route DELETE /service/sessions/:id",
+        "Express route GET /middleware/users",
+        "Express route GET /service/generic-middleware-users",
+        "Express route GET /service/async-middleware-users",
+        "Express route GET /service/json-users",
+        "Express route GET /service/imported-users",
+        "Express route GET /service/pathless-users",
+        "Express route GET /service/direct-pathless-users",
+        "Express route GET /service/first-pathless-users",
+        "Express route GET /service/second-pathless-users",
+        "Express route GET /array/array-users",
+        "Express route GET /alt-array/array-users",
+        "Express route GET /*/wildcard-users",
+        "Express route GET /member-users",
+        "Hono route GET /api/users",
+        "Hono route DELETE /api/v1/sessions/:id",
+      ]),
+    );
+    expect(titles).not.toContain("Express route GET /users");
+    expect(titles).not.toContain("Express route GET /reports");
+    expect(titles).not.toContain("Express route POST /v1/teams");
+    expect(titles).not.toContain("Express route DELETE /sessions/:id");
+    expect(titles).not.toContain("Express route GET /false/false-users");
+    expect(titles).not.toContain("Express route GET /generic-middleware-users");
+    expect(titles).not.toContain("Express route GET /async-middleware-users");
+    expect(titles).not.toContain("Express route GET /json-users");
+    expect(titles).not.toContain("Express route GET /imported-users");
+    expect(titles).not.toContain("Express route GET /pathless-users");
+    expect(titles).not.toContain("Express route GET /direct-pathless-users");
+    expect(titles).not.toContain("Express route GET /first-pathless-users");
+    expect(titles).not.toContain("Express route GET /second-pathless-users");
+    expect(titles).not.toContain("Express route GET /array-users");
+    expect(titles).not.toContain("Express route GET /wildcard-users");
+    expect(titles).not.toContain("Express route GET /dynamic-users");
+    expect(titles).not.toContain("Express route GET /dynamic-child-users");
+    expect(titles).not.toContain("Express route GET /auth-path-users");
+    expect(titles).not.toContain("Express route GET /dynamic-mw-users");
+    expect(titles).not.toContain("Express route GET /tenant-users");
+    expect(titles).not.toContain("Express route GET /member/member-users");
+    expect(titles).not.toContain("Express route GET /v1/dynamic-child-users");
+    expect(titles).not.toContain("Hono route GET /users");
+    expect(titles).not.toContain("Hono route GET /dynamic-users");
+    expect(titles).not.toContain("Hono route DELETE /v1/sessions/:id");
+    expect(titles).not.toContain("Hono route GET /false/false-users");
+  });
+
   it("keeps index route tests scoped to their route directory", async () => {
     const root = await fixtureRoot("clawpatch-node-server-index-route-tests-");
     await writeFixture(
@@ -13227,6 +13440,100 @@ add_executable(headerapp include/headers.hpp)
     expect(admin?.trustBoundaries).toContain("auth");
   });
 
+  it("maps static Flask blueprint url prefixes", async () => {
+    const root = await fixtureRoot("clawpatch-python-flask-blueprint-prefixes-");
+    await writeFixture(root, "requirements.txt", "Flask\npytest\n");
+    await writeFixture(
+      root,
+      "web/app.py",
+      [
+        "from flask import Blueprint, Flask",
+        "",
+        "app = Flask(__name__)",
+        "API_PREFIX = '/dynamic'",
+        "api_bp = Blueprint('api', __name__, url_prefix='/api')",
+        "registered_bp = Blueprint('registered', __name__)",
+        "dynamic_bp = Blueprint('dynamic', __name__, url_prefix=API_PREFIX)",
+        "runtime_bp = Blueprint('runtime', __name__)",
+        "overridden_bp = Blueprint('overridden', __name__, url_prefix='/constructor')",
+        "none_bp = Blueprint('none', __name__, url_prefix='/kept')",
+        "none_comment_bp = Blueprint('none_comment', __name__, url_prefix='/kept-comment')",
+        "constructor_comment_bp = Blueprint(",
+        "    'constructor_comment',",
+        "    __name__,",
+        "    url_prefix='/constructor-comment'  # use constructor literal",
+        ")",
+        "literal_comment_bp = Blueprint('literal_comment', __name__, url_prefix='/constructor')",
+        "app.register_blueprint(registered_bp, url_prefix='/registered')",
+        "app.register_blueprint(runtime_bp, url_prefix=API_PREFIX)",
+        "app.register_blueprint(overridden_bp, url_prefix=API_PREFIX)",
+        "app.register_blueprint(none_bp, url_prefix=None)",
+        "app.register_blueprint(",
+        "    none_comment_bp,",
+        "    url_prefix=None  # use constructor default",
+        ")",
+        "app.register_blueprint(",
+        "    literal_comment_bp,",
+        "    url_prefix='/literal'  # use literal override",
+        ")",
+        "",
+        "@api_bp.route('/users')",
+        "def users():",
+        "    return 'users'",
+        "",
+        "@registered_bp.route('/reports', methods=['POST'])",
+        "def reports():",
+        "    return 'reports'",
+        "",
+        "@dynamic_bp.route('/metrics')",
+        "def metrics():",
+        "    return 'metrics'",
+        "",
+        "@runtime_bp.route('/events')",
+        "def events():",
+        "    return 'events'",
+        "",
+        "@overridden_bp.route('/health')",
+        "def health():",
+        "    return 'health'",
+        "",
+        "@none_bp.route('/ready')",
+        "def ready():",
+        "    return 'ready'",
+        "",
+        "@none_comment_bp.route('/ready')",
+        "def ready_with_comment():",
+        "    return 'ready'",
+        "",
+        "@constructor_comment_bp.route('/ready')",
+        "def ready_with_constructor_comment():",
+        "    return 'ready'",
+        "",
+        "@literal_comment_bp.route('/ready')",
+        "def ready_with_literal_comment():",
+        "    return 'ready'",
+        "",
+      ].join("\n"),
+    );
+
+    const project = await detectProject(root);
+    const result = await mapFeatures(root, project, []);
+    const titles = result.features.map((feature) => feature.title);
+
+    expect(titles).toContain("Flask route GET /api/users");
+    expect(titles).toContain("Flask route POST /registered/reports");
+    expect(titles).toContain("Flask route GET /metrics");
+    expect(titles).toContain("Flask route GET /events");
+    expect(titles).toContain("Flask route GET /health");
+    expect(titles).toContain("Flask route GET /kept/ready");
+    expect(titles).toContain("Flask route GET /kept-comment/ready");
+    expect(titles).toContain("Flask route GET /constructor-comment/ready");
+    expect(titles).toContain("Flask route GET /literal/ready");
+    expect(titles).not.toContain("Flask route GET /dynamic/metrics");
+    expect(titles).not.toContain("Flask route GET /dynamic/events");
+    expect(titles).not.toContain("Flask route GET /constructor/health");
+  });
+
   it("maps root-level Flask entry files and non-list methods", async () => {
     const root = await fixtureRoot("clawpatch-python-flask-root-routes-");
     await writeFixture(root, "requirements.txt", "Flask\npytest\n");
@@ -13310,6 +13617,8 @@ add_executable(headerapp include/headers.hpp)
     const root = await fixtureRoot("clawpatch-python-django-routes-");
     await writeFixture(root, "requirements.txt", "django\npytest\n");
     await writeFixture(root, "mysite/__init__.py", "");
+    await writeFixture(root, "api/__init__.py", "");
+    await writeFixture(root, "api/v1/__init__.py", "");
     await writeFixture(
       root,
       "mysite/urls.py",
@@ -13365,6 +13674,7 @@ add_executable(headerapp include/headers.hpp)
         "    path('signup/', SignupView.as_view(), name='signup'),",
         "    path('admin/', admin.site.urls),",
         "    path('api/', include('api.urls')),",
+        "    path('slashless', include('api.urls')),",
         "    path('tuple-api/', include(('tuple.urls', 'tuple'), namespace='tuple')),",
         "    re_path(r'^legacy/(?P<slug>[-\\w]+)/$', views.legacy, name='legacy'),",
         "    url(r'^old/(?P<pk>\\d+)/$', views.old_detail),",
@@ -13382,6 +13692,34 @@ add_executable(headerapp include/headers.hpp)
     await writeFixture(root, "fallback/__init__.py", "");
     await writeFixture(
       root,
+      "api/urls.py",
+      [
+        "from django.urls import include, path",
+        "from . import views",
+        "",
+        "urlpatterns = [",
+        "    path('users/<int:pk>/', views.user_detail, name='user-detail'),",
+        "    path('status/', views.status, name='status'),",
+        "    path('v1/', include('api.v1.urls')),",
+        "]",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
+      "api/v1/urls.py",
+      [
+        "from django.urls import path",
+        "from . import views",
+        "",
+        "urlpatterns = [",
+        "    path('ping/', views.ping, name='ping'),",
+        "]",
+        "",
+      ].join("\n"),
+    );
+    await writeFixture(
+      root,
       "fallback/urls.py",
       [
         "from . import views",
@@ -13392,8 +13730,12 @@ add_executable(headerapp include/headers.hpp)
         "",
       ].join("\n"),
     );
+    await writeFixture(root, "api/views.py", "def user_detail():\n    pass\n");
+    await writeFixture(root, "api/v1/views.py", "def ping():\n    pass\n");
     await writeFixture(root, "mysite/views.py", "class SignupView:\n    pass\n");
     await writeFixture(root, "fallback/views.py", "def dependency_only():\n    pass\n");
+    await writeFixture(root, "api/test_urls.py", "def test_api_urls():\n    pass\n");
+    await writeFixture(root, "api/v1/test_urls.py", "def test_api_v1_urls():\n    pass\n");
     await writeFixture(root, "mysite/test_urls.py", "def test_urls():\n    pass\n");
 
     const project = await detectProject(root);
@@ -13413,6 +13755,15 @@ add_executable(headerapp include/headers.hpp)
         "Django route /signup/",
         "Django route /admin/",
         "Django route /api/",
+        "Django route /api/users/:pk/",
+        "Django route /api/status/",
+        "Django route /api/v1/",
+        "Django route /api/v1/ping/",
+        "Django route /slashless",
+        "Django route /slashlessusers/:pk/",
+        "Django route /slashlessstatus/",
+        "Django route /slashlessv1/",
+        "Django route /slashlessv1/ping/",
         "Django route /tuple-api/",
         "Django route /dependency-only/",
         "Django route /legacy/:slug/",
@@ -13431,6 +13782,34 @@ add_executable(headerapp include/headers.hpp)
       { path: "mysite/test_urls.py", command: "pytest" },
     ]);
     expect(byTitle("Django route /api/")?.entrypoints[0]?.symbol).toBe("api.urls");
+    expect(byTitle("Django route /slashless")?.entrypoints[0]?.symbol).toBe("api.urls");
+    expect(byTitle("Django route /api/users/:pk/")?.entrypoints[0]).toMatchObject({
+      path: "api/urls.py",
+      symbol: "views.user_detail",
+      route: "/api/users/:pk/",
+    });
+    expect(byTitle("Django route /slashlessusers/:pk/")?.entrypoints[0]).toMatchObject({
+      path: "api/urls.py",
+      symbol: "views.user_detail",
+      route: "/slashlessusers/:pk/",
+    });
+    expect(byTitle("Django route /api/users/:pk/")?.tests).toEqual([
+      { path: "api/test_urls.py", command: "pytest" },
+      { path: "api/v1/test_urls.py", command: "pytest" },
+    ]);
+    expect(byTitle("Django route /api/v1/")?.entrypoints[0]).toMatchObject({
+      path: "api/urls.py",
+      symbol: "api.v1.urls",
+      route: "/api/v1/",
+    });
+    expect(byTitle("Django route /api/v1/ping/")?.entrypoints[0]).toMatchObject({
+      path: "api/v1/urls.py",
+      symbol: "views.ping",
+      route: "/api/v1/ping/",
+    });
+    expect(byTitle("Django route /api/v1/ping/")?.tests).toEqual([
+      { path: "api/v1/test_urls.py", command: "pytest" },
+    ]);
     expect(byTitle("Django route /tuple-api/")?.entrypoints[0]?.symbol).toBeNull();
     expect(byTitle("Django route /signup/")?.entrypoints[0]?.symbol).toBe("SignupView.as_view");
     expect(byTitle("Django route /admin/")?.entrypoints[0]?.symbol).toBe("admin.site.urls");
@@ -13441,6 +13820,10 @@ add_executable(headerapp include/headers.hpp)
     });
     expect(byTitle("Django route /accounts/password/reset/")?.trustBoundaries).toContain("auth");
     expect(byTitle("Django route /signup/")?.trustBoundaries).toContain("auth");
+    expect(routes.filter((feature) => feature.title === "Django route /users/:pk/")).toHaveLength(
+      1,
+    );
+    expect(byTitle("Django route /users/:pk/")?.entrypoints[0]?.path).toBe("mysite/urls.py");
     expect(byTitle("Django route /users/:pk/")?.trustBoundaries).not.toContain("auth");
     expect(byTitle("Django route /orders/")?.trustBoundaries).not.toContain("auth");
     expect(titles).not.toContain("Django route /tenant/");
@@ -13453,6 +13836,9 @@ add_executable(headerapp include/headers.hpp)
     expect(titles).not.toContain("Django route /indented-docs-only/");
     expect(titles).not.toContain("Django route /local-only/");
     expect(titles).not.toContain("Django route /helper/");
+    expect(titles).not.toContain("Django route /status/");
+    expect(titles).not.toContain("Django route /v1/");
+    expect(titles).not.toContain("Django route /v1/ping/");
     expect(titles).not.toContain("Django route /unused/");
   });
 
