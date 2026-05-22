@@ -10,7 +10,6 @@ Files:
 - `social-card.png`: raster link preview card for Open Graph/Twitter
 - `robots.txt`: crawler policy with sitemap reference
 - `sitemap.xml`: canonical single-page sitemap
-- `_headers`: static security headers for hosts that support header files
 
 Preview:
 

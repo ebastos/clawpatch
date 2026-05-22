@@ -38,7 +38,6 @@ function extractFirst(html, pattern, label) {
 const html = await mustRead("website/index.html");
 const robots = await mustRead("website/robots.txt");
 const sitemap = await mustRead("website/sitemap.xml");
-const headers = await mustRead("website/_headers");
 
 const title = stripTags(extractFirst(html, /<title>([\s\S]*?)<\/title>/iu, "title"));
 if (title !== "Clawpatch — Automated Code Review") {
@@ -67,19 +66,6 @@ if (!robots.includes("Sitemap: https://clawpatch.ai/sitemap.xml")) {
 
 if (!sitemap.includes("<loc>https://clawpatch.ai/</loc>")) {
   fail("sitemap.xml missing canonical homepage loc");
-}
-
-for (const expectedHeader of [
-  "Strict-Transport-Security",
-  "X-Content-Type-Options",
-  "X-Frame-Options",
-  "Referrer-Policy",
-  "Permissions-Policy",
-  "Content-Security-Policy",
-]) {
-  if (!headers.includes(expectedHeader)) {
-    fail(`_headers missing ${expectedHeader}`);
-  }
 }
 
 const socialCard = await readFile(join(website, "social-card.png"));
